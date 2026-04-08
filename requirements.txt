@@ -1,0 +1,35 @@
+# IPF Phase 1 — Server-Side Precompute Prototype
+# Compatible with Python 3.10 - 3.13
+
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+opencv-python-headless>=4.8.0   # headless version for Linux server (no GUI deps)
+Pillow>=10.0.0
+
+# Detection / Tracking
+ultralytics>=8.1.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Tracking helpers
+lap>=0.4.0
+
+# Configuration
+PyYAML>=6.0
+pydantic>=2.0.0
+
+# Visualization (non-interactive backend)
+matplotlib>=3.7.0
+
+# Logging & CLI
+typer>=0.9.0
+rich>=13.0.0
+
+# Experiment / Data
+pandas>=2.0.0
+tqdm>=4.65.0
+
+# Testing
+pytest>=7.3.0
+pytest-cov>=4.1.0

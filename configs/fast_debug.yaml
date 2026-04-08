@@ -1,0 +1,43 @@
+# =============================================================================
+# Fast Debug Config — Process only 10 frames with verbose logging
+# =============================================================================
+
+run_id: "debug_001"
+video_path: ""
+output_dir: "~/ipf_outputs"
+max_frames: 10
+log_level: "DEBUG"
+
+detector:
+  model_name: "yolov8n.pt"
+  confidence_threshold: 0.25
+  device: "cpu"
+  img_size: 640
+
+tracker:
+  tracker_type: "bytetrack"
+  track_buffer: 30
+
+field:
+  beta: 2.0
+  superposition: "sum"
+
+normalization:
+  rho: 0.9
+
+qp_mapping:
+  qp_base: 32
+  delta_roi: 10.0
+  delta_bg: 6.0
+
+bounded_dynamics:
+  eta: 0.7
+  delta_slew: 3.0
+
+ctu:
+  ctu_size: 128
+
+viz:
+  save_field_maps: true
+  save_qp_overlays: true
+  save_every_n_frames: 1

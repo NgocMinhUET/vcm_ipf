@@ -1,0 +1,98 @@
+# =============================================================================
+# IPF Phase 1 — Default Configuration
+# =============================================================================
+# Tracker-Informed Spatiotemporal Importance Field with Bounded QP Dynamics
+# for ROI-aware VVC Coding for Machine Vision
+# =============================================================================
+
+run_id: "run_001"
+video_path: ""          # Set via CLI or override here
+output_dir: "~/ipf_outputs"
+max_frames: null        # null = process all frames
+log_level: "INFO"
+
+# --- Detector ---
+detector:
+  model_name: "yolov8n.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  device: "cuda:0"
+  img_size: 640
+  classes: null         # null = all COCO classes
+
+# --- Tracker ---
+tracker:
+  tracker_type: "bytetrack"
+  track_high_thresh: 0.5
+  track_low_thresh: 0.1
+  new_track_thresh: 0.6
+  track_buffer: 30
+  match_thresh: 0.8
+
+# --- Importance Mass ---
+mass:
+  use_class_priority: true
+  use_track_age: true
+  age_warmup_frames: 5
+  class_priorities:
+    person: 1.0
+    car: 1.0
+    truck: 0.9
+    bus: 0.9
+    motorcycle: 0.8
+    bicycle: 0.8
+
+# --- Field Parameters ---
+field:
+  beta: 2.0             # Distance decay exponent
+  eps_d: 0.001           # Distance epsilon
+  eps_k: 0.000001        # Kernel epsilon
+  alpha_w: 0.75          # Width scaling
+  alpha_h: 0.75          # Height scaling
+  superposition: "sum"   # "sum" or "max"
+
+# --- Temporal Normalization ---
+normalization:
+  rho: 0.95              # EMA smoothing factor
+  percentile_low: 5.0
+  percentile_high: 95.0
+  eps_n: 0.00000001
+
+# --- QP Mapping ---
+qp_mapping:
+  qp_base: 32
+  delta_roi: 10.0
+  delta_bg: 6.0
+  gamma_roi: 1.0
+  gamma_bg: 1.0
+  mu: 0.3                # Foreground/background threshold
+
+# --- Bounded QP Dynamics ---
+bounded_dynamics:
+  eta: 0.7               # Temporal low-pass factor
+  delta_slew: 3.0        # Max QP change per frame per CTU
+  qp_min: 10
+  qp_max: 51
+
+# --- CTU ---
+ctu:
+  ctu_size: 128
+
+# --- Visualization ---
+viz:
+  save_field_maps: true
+  save_qp_overlays: true
+  save_object_overlays: true
+  colormap: "jet"
+  overlay_alpha: 0.4
+  dpi: 100
+  save_every_n_frames: 1
+
+# --- Output ---
+output:
+  save_object_states: true
+  save_field_npy: false
+  save_qp_csv: true
+  save_qp_vtm: true
+  save_summary_json: true
+  save_frame_summaries: true

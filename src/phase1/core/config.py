@@ -1,0 +1,154 @@
+"""Configuration management for the IPF pipeline.
+
+All parameters are gathered into a single Pydantic model loaded from YAML.
+This ensures type validation, default values, and easy serialization.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Sub-configs
+# ---------------------------------------------------------------------------
+
+class DetectorConfig(BaseModel):
+    model_name: str = Field("yolov8n.pt", description="Ultralytics model identifier")
+    confidence_threshold: float = Field(0.25, ge=0.0, le=1.0)
+    iou_threshold: float = Field(0.45, ge=0.0, le=1.0)
+    device: str = Field("cuda:0", description="'cuda:0', 'cpu', or 'auto'")
+    img_size: int = Field(640, description="Inference resolution")
+    classes: Optional[list[int]] = Field(
+        None, description="COCO class IDs to keep; None = all"
+    )
+
+
+class TrackerConfig(BaseModel):
+    tracker_type: str = Field("bytetrack", description="bytetrack | botsort")
+    track_high_thresh: float = 0.5
+    track_low_thresh: float = 0.1
+    new_track_thresh: float = 0.6
+    track_buffer: int = 30
+    match_thresh: float = 0.8
+
+
+class FieldConfig(BaseModel):
+    beta: float = Field(2.0, description="Distance decay exponent")
+    eps_d: float = Field(1e-3, description="Epsilon for distance denominator")
+    eps_k: float = Field(1e-6, description="Epsilon for kernel denominator")
+    alpha_w: float = Field(0.75, description="Width scaling for normalized distance")
+    alpha_h: float = Field(0.75, description="Height scaling for normalized distance")
+    superposition: str = Field("sum", description="sum | max")
+
+
+class MassConfig(BaseModel):
+    use_class_priority: bool = True
+    use_track_age: bool = True
+    age_warmup_frames: int = Field(5, ge=1)
+    class_priorities: dict[str, float] = Field(
+        default_factory=lambda: {
+            "person": 1.0,
+            "car": 1.0,
+            "truck": 0.9,
+            "bus": 0.9,
+            "motorcycle": 0.8,
+            "bicycle": 0.8,
+        }
+    )
+
+
+class NormalizationConfig(BaseModel):
+    rho: float = Field(0.95, ge=0.0, le=1.0, description="EMA smoothing factor")
+    percentile_low: float = Field(5.0, description="Lower percentile for a_t")
+    percentile_high: float = Field(95.0, description="Upper percentile for b_t")
+    eps_n: float = Field(1e-8, description="Epsilon for normalization denominator")
+
+
+class QPMappingConfig(BaseModel):
+    qp_base: int = Field(32, ge=0, le=63)
+    delta_roi: float = Field(10.0, ge=0.0, description="Max QP decrease for ROI")
+    delta_bg: float = Field(6.0, ge=0.0, description="Max QP increase for background")
+    gamma_roi: float = Field(1.0, gt=0.0, description="ROI mapping curvature")
+    gamma_bg: float = Field(1.0, gt=0.0, description="Background mapping curvature")
+    mu: float = Field(0.3, ge=0.0, le=1.0, description="Foreground/background threshold")
+
+
+class BoundedDynamicsConfig(BaseModel):
+    eta: float = Field(0.7, ge=0.0, le=1.0, description="Temporal low-pass factor")
+    delta_slew: float = Field(3.0, ge=0.0, description="Max QP change per frame")
+    qp_min: int = Field(10, ge=0, le=63)
+    qp_max: int = Field(51, ge=0, le=63)
+
+
+class CTUConfig(BaseModel):
+    ctu_size: int = Field(128, description="CTU size in pixels (64 or 128)")
+
+
+class VizConfig(BaseModel):
+    save_field_maps: bool = True
+    save_qp_overlays: bool = True
+    save_object_overlays: bool = True
+    colormap: str = "jet"
+    overlay_alpha: float = 0.4
+    dpi: int = 100
+    save_every_n_frames: int = Field(1, ge=1)
+
+
+class OutputConfig(BaseModel):
+    save_object_states: bool = True
+    save_field_npy: bool = False
+    save_qp_csv: bool = True
+    save_qp_vtm: bool = True
+    save_summary_json: bool = True
+    save_frame_summaries: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Top-level config
+# ---------------------------------------------------------------------------
+
+class IPFConfig(BaseModel):
+    """Root configuration for the IPF Phase 1 pipeline."""
+
+    run_id: str = Field("run_001", description="Unique run identifier")
+    video_path: str = Field("", description="Path to input video")
+    output_dir: str = Field("outputs/", description="Root output directory")
+
+    detector: DetectorConfig = Field(default_factory=DetectorConfig)
+    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    field: FieldConfig = Field(default_factory=FieldConfig)
+    mass: MassConfig = Field(default_factory=MassConfig)
+    normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
+    qp_mapping: QPMappingConfig = Field(default_factory=QPMappingConfig)
+    bounded_dynamics: BoundedDynamicsConfig = Field(default_factory=BoundedDynamicsConfig)
+    ctu: CTUConfig = Field(default_factory=CTUConfig)
+    viz: VizConfig = Field(default_factory=VizConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
+
+    max_frames: Optional[int] = Field(
+        None, description="Process only first N frames (None = all)"
+    )
+    log_level: str = Field("INFO", description="Logging level")
+
+
+def load_config(path: str | Path) -> IPFConfig:
+    """Load IPFConfig from a YAML file, falling back to defaults for missing keys."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    return IPFConfig(**raw)
+
+
+def save_config(cfg: IPFConfig, path: str | Path) -> None:
+    """Serialize config to YAML for reproducibility."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg.model_dump(), f, default_flow_style=False, sort_keys=False)
