@@ -1,10 +1,15 @@
 """Multi-method comparison pipeline.
 
 Runs detection/tracking ONCE, then applies all QP methods (M0, M1, M4-IPF,
-M5-M8) to the same object states. This ensures:
-    1. Fair comparison (identical detections)
-    2. Efficiency (detection only runs once)
-    3. Reproducibility (same random seed, same objects)
+M5-M8) to the same object states. Ensures strict fairness:
+    1. Identical detections (shared tracker)
+    2. Same QP mapping function (map_field_to_qp) for all methods
+    3. Same bounded dynamics controller settings
+    4. Only the importance map computation differs per method
+
+This design guarantees that any measured difference in temporal stability
+or spatial smoothness is attributable to the importance map formulation,
+not to pipeline differences.
 """
 
 from __future__ import annotations
@@ -40,13 +45,23 @@ from phase1.utils.timer import timer
 
 logger = get_logger("analysis.comparison")
 
+DEFAULT_WARMUP_SKIP = 10
+
 
 class ComparisonPipeline:
     """Run all methods on the same video and produce comparison data.
 
+    Fairness protocol:
+        - All methods share the same detector/tracker output
+        - All methods (except M0) go through the same pipeline:
+          importance_map → map_field_to_qp → BoundedQPController
+        - IPF additionally uses TemporalNormalizer before QP mapping
+          (this is part of its method, not a pipeline advantage)
+        - Metrics are computed both with and without warmup exclusion
+
     Usage:
         cfg = load_config("configs/default.yaml")
-        comp = ComparisonPipeline(cfg, methods=["M0", "M1", "M4", "M5", "M6", "M7", "M8"])
+        comp = ComparisonPipeline(cfg, methods=["M0","M1","M4","M5","M6","M7","M8"])
         comp.run()
     """
 
@@ -54,10 +69,12 @@ class ComparisonPipeline:
         self,
         cfg: IPFConfig,
         methods: Optional[list[str]] = None,
+        warmup_skip: int = DEFAULT_WARMUP_SKIP,
     ):
         self.cfg = cfg
         self.method_ids = methods or ["M0", "M1", "M4", "M5", "M6", "M7", "M8"]
         self.run_dir = Path(cfg.output_dir).expanduser() / cfg.run_id
+        self.warmup_skip = warmup_skip
 
     def run(self) -> dict:
         """Execute comparison pipeline.
@@ -67,11 +84,9 @@ class ComparisonPipeline:
         """
         t_start = time.time()
 
-        # Setup directories
         self.run_dir.mkdir(parents=True, exist_ok=True)
         for mid in self.method_ids:
             (self.run_dir / mid / "qp_vtm").mkdir(parents=True, exist_ok=True)
-            (self.run_dir / mid / "qp_maps").mkdir(parents=True, exist_ok=True)
 
         log_file = self.run_dir / "comparison.log"
         setup_logging(self.cfg.log_level, log_file=log_file)
@@ -80,33 +95,44 @@ class ComparisonPipeline:
         logger.info("=" * 60)
         logger.info("Multi-Method Comparison — Run: %s", self.cfg.run_id)
         logger.info("Methods: %s", ", ".join(self.method_ids))
+        logger.info("Warmup skip: %d frames (for steady-state metrics)", self.warmup_skip)
         logger.info("=" * 60)
 
-        # Initialize detector/tracker (shared across all methods)
         tracker = DetectorTracker(self.cfg.detector, self.cfg.tracker, self.cfg.mass)
         reader = VideoReader(self.cfg.video_path, max_frames=self.cfg.max_frames)
         w, h = reader.frame_size
 
         logger.info("Video: %dx%d, %d frames", w, h, reader.total_frames)
 
-        # Initialize methods
+        # Initialize baseline importance-map generators
+        bl_cfg = self.cfg.baselines
         baseline_methods: dict[str, BaseQPMethod] = {}
         for mid in self.method_ids:
-            if mid == "M4":
-                continue  # IPF handled separately
-            if mid in METHOD_REGISTRY:
-                baseline_methods[mid] = create_method(
-                    mid, self.cfg.qp_mapping, self.cfg.ctu, self.cfg.bounded_dynamics
-                )
+            if mid in ("M4", "M0"):
+                continue
+            if mid not in METHOD_REGISTRY:
+                continue
+            kwargs: dict = {}
+            if mid == "M5":
+                kwargs["sigma_factor"] = bl_cfg.m5_sigma_factor
+            elif mid == "M6":
+                kwargs["alpha"] = bl_cfg.m6_alpha
+            elif mid == "M7":
+                kwargs["cutoff_factor"] = bl_cfg.m7_cutoff_factor
+            elif mid == "M8":
+                kwargs["blur_factor"] = bl_cfg.m8_blur_factor
+            baseline_methods[mid] = create_method(
+                mid, self.cfg.qp_mapping, self.cfg.ctu, self.cfg.bounded_dynamics,
+                **kwargs,
+            )
 
-        # IPF components (M4)
+        # IPF-specific components (M4)
         ipf_normalizer = TemporalNormalizer(self.cfg.normalization) if "M4" in self.method_ids else None
-        ipf_controller = BoundedQPController(self.cfg.bounded_dynamics) if "M4" in self.method_ids else None
 
-        # Per-method bounded dynamics controllers (for fair temporal comparison)
+        # Per-method bounded dynamics (all non-M0 methods share same config)
         bd_controllers: dict[str, BoundedQPController] = {}
         for mid in self.method_ids:
-            if mid != "M0":  # M0 doesn't need temporal control
+            if mid != "M0":
                 bd_controllers[mid] = BoundedQPController(self.cfg.bounded_dynamics)
 
         # Storage
@@ -114,38 +140,39 @@ class ComparisonPipeline:
         all_qp_maps: dict[str, list[np.ndarray]] = {mid: [] for mid in self.method_ids}
         all_smoothness: dict[str, list[float]] = {mid: [] for mid in self.method_ids}
 
-        # Process frames
         effective_total = self.cfg.max_frames or reader.total_frames
         pbar = tqdm(total=effective_total, desc="Comparing", unit="frame")
 
         try:
             for frame_idx, frame in reader:
-                # Step 1: Detect + track (SHARED)
                 objects = tracker.process_frame(frame, frame_idx)
 
-                # Step 2: Apply each method
                 for mid in self.method_ids:
-                    if mid == "M4":
-                        # IPF method (our proposed)
+                    if mid == "M0":
+                        # Uniform QP anchor: no importance, constant QP
+                        from phase1.field.importance_field import build_ctu_grid
+                        _, _, nr, nc = build_ctu_grid(h, w, self.cfg.ctu.ctu_size)
+                        imp_map = np.zeros((nr, nc), dtype=np.float64)
+                        final_qp = np.full((nr, nc), self.cfg.qp_mapping.qp_base, dtype=np.int32)
+
+                    elif mid == "M4":
+                        # IPF: raw field → EMA normalization → QP mapping → bounded dynamics
                         raw_field, nr, nc = compute_superposition_field(
                             objects, h, w, self.cfg.field, self.cfg.ctu
                         )
-                        norm_field = ipf_normalizer.normalize(raw_field)
-                        raw_qp = map_field_to_qp(norm_field, self.cfg.qp_mapping)
-                        final_qp = ipf_controller.apply(raw_qp)
-                        imp_map = norm_field
+                        imp_map = ipf_normalizer.normalize(raw_field)
+                        raw_qp = map_field_to_qp(imp_map, self.cfg.qp_mapping)
+                        final_qp = bd_controllers[mid].apply(raw_qp)
+
                     elif mid in baseline_methods:
-                        imp_map, raw_qp_int = baseline_methods[mid].compute_qp_map(objects, h, w)
-                        raw_qp = raw_qp_int.astype(np.float64)
-                        # Apply bounded dynamics for fair temporal comparison
-                        if mid in bd_controllers:
-                            final_qp = bd_controllers[mid].apply(raw_qp)
-                        else:
-                            final_qp = raw_qp_int
+                        # Baselines: importance map → SAME QP mapping → SAME bounded dynamics
+                        imp_map = baseline_methods[mid].compute_importance_map(objects, h, w)
+                        raw_qp = map_field_to_qp(imp_map, self.cfg.qp_mapping)
+                        final_qp = bd_controllers[mid].apply(raw_qp)
+
                     else:
                         continue
 
-                    # Collect stats
                     stats = compute_frame_stats(
                         final_qp, imp_map, frame_idx, len(objects), self.cfg.qp_mapping.mu
                     )
@@ -153,7 +180,6 @@ class ComparisonPipeline:
                     all_qp_maps[mid].append(final_qp.copy())
                     all_smoothness[mid].append(compute_spatial_smoothness(final_qp))
 
-                    # Export QP maps
                     export_qp_vtm(
                         final_qp,
                         self.run_dir / mid / "qp_vtm" / f"qp_{frame_idx:06d}.txt",
@@ -166,12 +192,15 @@ class ComparisonPipeline:
             reader.release()
             pbar.close()
 
-        # Compute temporal metrics for each method
-        temporal_results: dict[str, TemporalMetrics] = {}
+        # Compute temporal metrics: both full-sequence and steady-state
+        temporal_full: dict[str, TemporalMetrics] = {}
+        temporal_steady: dict[str, TemporalMetrics] = {}
         for mid in self.method_ids:
             if all_qp_maps[mid]:
-                tm = compute_temporal_metrics(all_qp_maps[mid], mid)
-                temporal_results[mid] = tm
+                temporal_full[mid] = compute_temporal_metrics(all_qp_maps[mid], mid, skip_first_n=0)
+                temporal_steady[mid] = compute_temporal_metrics(
+                    all_qp_maps[mid], mid, skip_first_n=self.warmup_skip
+                )
 
         # Write per-method frame stats CSV
         for mid in self.method_ids:
@@ -188,20 +217,37 @@ class ComparisonPipeline:
             "run_id": self.cfg.run_id,
             "video": self.cfg.video_path,
             "n_frames": effective_total,
-            "methods": {},
+            "warmup_skip": self.warmup_skip,
+            "methods_full": {},
+            "methods_steady": {},
         }
-        for mid, tm in temporal_results.items():
-            smoothness_vals = all_smoothness.get(mid, [])
-            summary["methods"][mid] = {
-                **asdict(tm),
-                "spatial_smoothness_mean": float(np.mean(smoothness_vals)) if smoothness_vals else 0.0,
-            }
+        for mid in self.method_ids:
+            sm_vals = all_smoothness.get(mid, [])
+            sm_mean = float(np.mean(sm_vals)) if sm_vals else 0.0
+            sm_steady = float(np.mean(sm_vals[self.warmup_skip:])) if len(sm_vals) > self.warmup_skip else sm_mean
+
+            if mid in temporal_full:
+                summary["methods_full"][mid] = {
+                    **asdict(temporal_full[mid]),
+                    "spatial_smoothness_mean": sm_mean,
+                }
+            if mid in temporal_steady:
+                summary["methods_steady"][mid] = {
+                    **asdict(temporal_steady[mid]),
+                    "spatial_smoothness_mean": sm_steady,
+                }
 
         summary_path = self.run_dir / "comparison_summary.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-        # Write comparison table (readable)
-        self._write_comparison_table(temporal_results, all_smoothness)
+        # Write both tables
+        self._write_comparison_table(
+            temporal_full, all_smoothness, "FULL SEQUENCE", "comparison_table_full.txt", 0
+        )
+        self._write_comparison_table(
+            temporal_steady, all_smoothness, f"STEADY STATE (skip first {self.warmup_skip})",
+            "comparison_table_steady.txt", self.warmup_skip,
+        )
 
         t_total = time.time() - t_start
         logger.info("=" * 60)
@@ -215,11 +261,14 @@ class ComparisonPipeline:
         self,
         temporal: dict[str, TemporalMetrics],
         smoothness: dict[str, list[float]],
+        title: str,
+        filename: str,
+        skip_n: int,
     ) -> None:
         """Write a human-readable comparison table."""
         lines = []
         lines.append("=" * 100)
-        lines.append("COMPARISON TABLE — QP Map Methods")
+        lines.append(f"COMPARISON TABLE — {title}")
         lines.append("=" * 100)
         lines.append(
             f"{'Method':<25} {'QP Mean':>8} {'QP Std':>8} "
@@ -232,7 +281,9 @@ class ComparisonPipeline:
             if mid not in temporal:
                 continue
             tm = temporal[mid]
-            sm = float(np.mean(smoothness.get(mid, [0])))
+            sm_vals = smoothness.get(mid, [0])
+            sm_slice = sm_vals[skip_n:] if len(sm_vals) > skip_n else sm_vals
+            sm = float(np.mean(sm_slice))
 
             name = mid
             if mid == "M4":
@@ -255,10 +306,9 @@ class ComparisonPipeline:
         lines.append("  Smooth     = spatial gradient (lower = smoother QP transitions)")
         lines.append("=" * 100)
 
-        table_path = self.run_dir / "comparison_table.txt"
+        table_path = self.run_dir / filename
         table_path.write_text("\n".join(lines), encoding="utf-8")
-        logger.info("Comparison table saved: %s", table_path.name)
+        logger.info("Table saved: %s", filename)
 
-        # Also print to log
         for line in lines:
             logger.info(line)

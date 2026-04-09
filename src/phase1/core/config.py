@@ -85,6 +85,26 @@ class BoundedDynamicsConfig(BaseModel):
     qp_max: int = Field(51, ge=0, le=63)
 
 
+class BaselineConfig(BaseModel):
+    """Tunable parameters for baseline QP methods.
+
+    Defaults are chosen to produce comparable ROI coverage (~25-35% of CTUs)
+    to IPF, ensuring fair comparison at similar operating points.
+    """
+    m5_sigma_factor: float = Field(
+        0.75, gt=0.0,
+        description="Gaussian sigma = factor * object_size (controls spread)")
+    m6_alpha: float = Field(
+        0.8, gt=0.0,
+        description="Exponential decay rate (lower = wider spread)")
+    m7_cutoff_factor: float = Field(
+        2.5, gt=0.0,
+        description="Distance cutoff in avg-bbox-diagonal units")
+    m8_blur_factor: float = Field(
+        2.0, gt=0.0,
+        description="Blur sigma in avg-bbox-diagonal units")
+
+
 class CTUConfig(BaseModel):
     ctu_size: int = Field(128, description="CTU size in pixels (64 or 128)")
 
@@ -126,6 +146,7 @@ class IPFConfig(BaseModel):
     normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
     qp_mapping: QPMappingConfig = Field(default_factory=QPMappingConfig)
     bounded_dynamics: BoundedDynamicsConfig = Field(default_factory=BoundedDynamicsConfig)
+    baselines: BaselineConfig = Field(default_factory=BaselineConfig)
     ctu: CTUConfig = Field(default_factory=CTUConfig)
     viz: VizConfig = Field(default_factory=VizConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

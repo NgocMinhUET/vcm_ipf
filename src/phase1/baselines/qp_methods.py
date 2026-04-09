@@ -1,21 +1,23 @@
 """Baseline QP map generation methods for controlled comparison.
 
 Each method takes the same inputs (objects, frame dimensions, config)
-and produces a CTU-level QP map — enabling direct, fair comparison.
+and produces a normalized importance map in [0, 1] at CTU resolution.
+The comparison pipeline applies the SAME QP mapping and bounded dynamics
+to all methods, ensuring fair comparison.
 
 Methods (from Experiment Matrix):
     M0: Uniform QP — VVC anchor, no ROI awareness
-    M1: Binary ROI — hard mask with fixed delta QP
+    M1: Binary ROI — hard mask, CTUs overlapping any bbox get importance=1
     M5: Gaussian heatmap — sigma proportional to object size
-    M6: Exponential decay — importance = exp(-alpha * distance)
-    M7: Distance transform — normalized inverse distance from ROI mask
+    M6: Exponential decay — importance = exp(-alpha * normalized_distance)
+    M7: Distance transform — inverse distance from ROI with cutoff
     M8: Blurred ROI — binary ROI followed by Gaussian blur
 
 All methods share:
-    - Same qp_base, delta_roi, delta_bg, qp_min, qp_max
+    - Same QP mapping (applied externally in comparison pipeline)
+    - Same bounded dynamics (applied externally)
     - Same CTU grid construction
-    - Same final clamp to [qp_min, qp_max]
-    - No temporal smoothing (applied separately in comparison pipeline)
+    - Importance map output normalized to [0, 1]
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
 
-import cv2
 import numpy as np
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
@@ -33,6 +34,14 @@ from phase1.field.importance_field import build_ctu_grid
 from phase1.utils.log import get_logger
 
 logger = get_logger("baselines.qp_methods")
+
+
+def _avg_bbox_diagonal(objects: list[ObjectState]) -> float:
+    """Average bounding box diagonal across all objects."""
+    if not objects:
+        return 100.0
+    diags = [np.sqrt(o.width**2 + o.height**2) for o in objects]
+    return float(np.mean(diags))
 
 
 class BaseQPMethod(ABC):
@@ -73,9 +82,10 @@ class BaseQPMethod(ABC):
         frame_h: int,
         frame_w: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Compute final QP map from importance map.
+        """Compute final QP map from importance map (standalone use).
 
-        Uses the same asymmetric mapping as IPF for fair comparison.
+        For comparison pipeline, use compute_importance_map() directly
+        with the shared QP mapping to ensure identical processing.
 
         Returns:
             (importance_map, qp_map) both at CTU resolution.
@@ -126,7 +136,11 @@ class M0_UniformQP(BaseQPMethod):
 # =========================================================================
 
 class M1_BinaryROI(BaseQPMethod):
-    """M1: Hard binary ROI mask. CTU is ROI if any object center falls in it."""
+    """M1: Hard binary ROI mask.
+
+    All CTUs overlapping any object bounding box get importance=1.0,
+    producing a sharp ROI/background boundary.
+    """
 
     method_id = "M1"
     method_name = "Binary ROI"
@@ -137,7 +151,6 @@ class M1_BinaryROI(BaseQPMethod):
         ctu = self.ctu_cfg.ctu_size
 
         for obj in objects:
-            # Mark all CTUs that overlap with the bounding box
             x1 = obj.x_center - obj.width / 2
             y1 = obj.y_center - obj.height / 2
             x2 = obj.x_center + obj.width / 2
@@ -158,12 +171,10 @@ class M1_BinaryROI(BaseQPMethod):
 # =========================================================================
 
 class M5_GaussianHeatmap(BaseQPMethod):
-    """M5: Gaussian kernel centered at each object. Sigma proportional to object size.
+    """M5: Gaussian kernel centered at each object.
 
-    sigma_x = sigma_factor * width
-    sigma_y = sigma_factor * height
-
-    Matched parameter budget: sigma_factor is the single tunable parameter.
+    sigma_x = sigma_factor * width, sigma_y = sigma_factor * height.
+    Uses max-superposition across objects and normalizes to [0, 1].
     """
 
     method_id = "M5"
@@ -185,9 +196,8 @@ class M5_GaussianHeatmap(BaseQPMethod):
             dy = (grid_y - obj.y_center) / sigma_y
 
             gauss = obj.confidence * np.exp(-0.5 * (dx**2 + dy**2))
-            imp = np.maximum(imp, gauss)  # max superposition for Gaussian
+            imp = np.maximum(imp, gauss)
 
-        # Normalize to [0, 1]
         if imp.max() > 1e-8:
             imp = imp / imp.max()
 
@@ -201,13 +211,15 @@ class M5_GaussianHeatmap(BaseQPMethod):
 class M6_ExponentialDecay(BaseQPMethod):
     """M6: importance = exp(-alpha * normalized_distance).
 
-    Matched parameter budget: alpha is the single tunable parameter.
+    Uses the same normalized distance as IPF (alpha_w * obj_width) for
+    fair spatial comparison. alpha controls the decay steepness.
+    Default alpha=0.8 gives ROI coverage comparable to other methods.
     """
 
     method_id = "M6"
     method_name = "Exponential Decay"
 
-    def __init__(self, *args, alpha: float = 2.0, **kwargs):
+    def __init__(self, *args, alpha: float = 0.8, **kwargs):
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
@@ -216,7 +228,6 @@ class M6_ExponentialDecay(BaseQPMethod):
         imp = np.zeros((nr, nc), dtype=np.float64)
 
         for obj in objects:
-            # Normalized distance (same as IPF for fairness)
             dx = (grid_x - obj.x_center) / (0.75 * obj.width + 1e-3)
             dy = (grid_y - obj.y_center) / (0.75 * obj.height + 1e-3)
             d = np.sqrt(dx**2 + dy**2)
@@ -231,28 +242,35 @@ class M6_ExponentialDecay(BaseQPMethod):
 
 
 # =========================================================================
-# M7: Distance Transform Weighting
+# M7: Distance Transform Weighting (with cutoff)
 # =========================================================================
 
 class M7_DistanceTransform(BaseQPMethod):
-    """M7: Normalized inverse distance transform from binary ROI mask.
+    """M7: Inverse distance transform from binary ROI mask with cutoff.
 
     Steps:
-        1. Create pixel-level binary ROI mask
-        2. Compute distance transform (distance to nearest ROI pixel)
-        3. Invert and normalize: importance = 1 - dist/max_dist
-        4. Downsample to CTU grid
+        1. Create pixel-level binary ROI mask from bounding boxes
+        2. Compute Euclidean distance transform (distance to nearest ROI pixel)
+        3. Apply cutoff: importance = clip(1 - dist/cutoff, 0, 1)
+           where cutoff = cutoff_factor * avg_bbox_diagonal
+        4. Downsample to CTU grid via average pooling
+
+    The cutoff prevents the distance transform from making every pixel
+    "somewhat important", ensuring meaningful ROI/BG separation.
     """
 
     method_id = "M7"
     method_name = "Distance Transform"
+
+    def __init__(self, *args, cutoff_factor: float = 2.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cutoff_factor = cutoff_factor
 
     def compute_importance_map(self, objects, frame_h, frame_w):
         ctu = self.ctu_cfg.ctu_size
         nr = int(np.ceil(frame_h / ctu))
         nc = int(np.ceil(frame_w / ctu))
 
-        # Pixel-level binary mask
         mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
         for obj in objects:
             x1 = max(0, int(obj.x_center - obj.width / 2))
@@ -264,12 +282,11 @@ class M7_DistanceTransform(BaseQPMethod):
         if mask.max() == 0:
             return np.zeros((nr, nc), dtype=np.float64)
 
-        # Distance transform from background to nearest foreground
         dist = distance_transform_edt(1 - mask)
-        max_dist = dist.max() + 1e-8
-        importance_pixel = 1.0 - (dist / max_dist)
 
-        # Downsample to CTU grid (average pooling)
+        cutoff = self.cutoff_factor * _avg_bbox_diagonal(objects)
+        importance_pixel = np.clip(1.0 - dist / (cutoff + 1e-8), 0.0, 1.0)
+
         imp = np.zeros((nr, nc), dtype=np.float64)
         for r in range(nr):
             for c in range(nc):
@@ -283,28 +300,30 @@ class M7_DistanceTransform(BaseQPMethod):
 
 
 # =========================================================================
-# M8: Blurred ROI Mask
+# M8: Blurred ROI Mask (adaptive sigma)
 # =========================================================================
 
 class M8_BlurredROI(BaseQPMethod):
     """M8: Binary ROI mask followed by Gaussian blur and normalization.
 
-    Matched parameter budget: blur_sigma is the single tunable parameter.
+    The blur sigma adapts to scene content:
+        sigma = blur_factor * avg_bbox_diagonal
+    This ensures the blur spread scales with object size, producing
+    comparable ROI coverage across different video resolutions and scenes.
     """
 
     method_id = "M8"
     method_name = "Blurred ROI"
 
-    def __init__(self, *args, blur_sigma: float = 64.0, **kwargs):
+    def __init__(self, *args, blur_factor: float = 2.0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.blur_sigma = blur_sigma
+        self.blur_factor = blur_factor
 
     def compute_importance_map(self, objects, frame_h, frame_w):
         ctu = self.ctu_cfg.ctu_size
         nr = int(np.ceil(frame_h / ctu))
         nc = int(np.ceil(frame_w / ctu))
 
-        # Pixel-level binary mask
         mask = np.zeros((frame_h, frame_w), dtype=np.float64)
         for obj in objects:
             x1 = max(0, int(obj.x_center - obj.width / 2))
@@ -313,13 +332,12 @@ class M8_BlurredROI(BaseQPMethod):
             y2 = min(frame_h, int(obj.y_center + obj.height / 2))
             mask[y1:y2, x1:x2] = obj.confidence
 
-        # Gaussian blur
-        blurred = gaussian_filter(mask, sigma=self.blur_sigma)
+        sigma = self.blur_factor * _avg_bbox_diagonal(objects)
+        blurred = gaussian_filter(mask, sigma=sigma)
 
         if blurred.max() > 1e-8:
             blurred = blurred / blurred.max()
 
-        # Downsample to CTU grid
         imp = np.zeros((nr, nc), dtype=np.float64)
         for r in range(nr):
             for c in range(nc):

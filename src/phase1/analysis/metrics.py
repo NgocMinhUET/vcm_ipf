@@ -83,11 +83,23 @@ def compute_frame_stats(
 def compute_temporal_metrics(
     qp_maps: list[np.ndarray],
     method_id: str,
+    skip_first_n: int = 0,
 ) -> TemporalMetrics:
     """Compute temporal stability metrics across all frames.
 
     This is the KEY metric for proving temporal consistency (KPI-2 in charter).
+
+    Args:
+        qp_maps: List of 2D QP arrays, one per frame.
+        method_id: Method identifier for labeling.
+        skip_first_n: Number of initial frames to exclude from metrics.
+            This removes transient warmup effects (EMA convergence,
+            track-age ramp) that would unfairly penalize methods with
+            temporal state. Set to 0 for full-sequence evaluation.
     """
+    if skip_first_n > 0 and len(qp_maps) > skip_first_n:
+        qp_maps = qp_maps[skip_first_n:]
+
     n_frames = len(qp_maps)
     if n_frames < 2:
         return TemporalMetrics(
@@ -100,14 +112,11 @@ def compute_temporal_metrics(
 
     means = [float(np.mean(qp)) for qp in qp_maps]
 
-    # Frame-to-frame mean QP change
     deltas = [abs(means[i+1] - means[i]) for i in range(n_frames - 1)]
 
-    # Per-CTU temporal standard deviation
     stacked = np.stack(qp_maps, axis=0).astype(np.float64)  # (T, R, C)
     per_ctu_std = np.std(stacked, axis=0)  # (R, C)
 
-    # Temporal jitter: mean absolute per-CTU change between consecutive frames
     per_ctu_deltas = []
     for i in range(n_frames - 1):
         delta = np.abs(qp_maps[i+1].astype(float) - qp_maps[i].astype(float))

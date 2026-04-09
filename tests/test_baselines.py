@@ -85,11 +85,40 @@ class TestM8:
         assert len(unique_vals) > 2
 
 
+class TestConfigurableParams:
+    """Verify baseline methods accept and use their tunable parameters."""
+
+    def test_m6_alpha(self):
+        m_wide = M6_ExponentialDecay(QP_CFG, CTU_CFG, BD_CFG, alpha=0.5)
+        m_narrow = M6_ExponentialDecay(QP_CFG, CTU_CFG, BD_CFG, alpha=3.0)
+        imp_wide, _ = m_wide.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        imp_narrow, _ = m_narrow.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        assert imp_wide.mean() > imp_narrow.mean()
+
+    def test_m7_cutoff(self):
+        m_wide = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=5.0)
+        m_narrow = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=1.0)
+        imp_wide, _ = m_wide.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        imp_narrow, _ = m_narrow.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        assert imp_wide.mean() >= imp_narrow.mean()
+
+    def test_m8_blur_factor(self):
+        m_wide = M8_BlurredROI(QP_CFG, CTU_CFG, BD_CFG, blur_factor=4.0)
+        m_narrow = M8_BlurredROI(QP_CFG, CTU_CFG, BD_CFG, blur_factor=0.5)
+        imp_wide, _ = m_wide.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        imp_narrow, _ = m_narrow.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
+        assert imp_wide.mean() >= imp_narrow.mean()
+
+
 class TestFactory:
     def test_create_all(self):
         for mid in ["M0", "M1", "M5", "M6", "M7", "M8"]:
             m = create_method(mid, QP_CFG, CTU_CFG, BD_CFG)
             assert m.method_id == mid
+
+    def test_create_with_kwargs(self):
+        m = create_method("M6", QP_CFG, CTU_CFG, BD_CFG, alpha=0.5)
+        assert m.alpha == 0.5
 
     def test_invalid_method(self):
         with pytest.raises(ValueError):

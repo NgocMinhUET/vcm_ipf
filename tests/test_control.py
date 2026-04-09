@@ -43,6 +43,24 @@ class TestTemporalNormalizer:
         assert norm._a is not None
         norm.reset()
         assert norm._a is None
+        assert norm._frame_count == 0
+
+    def test_progressive_warmup(self):
+        """EMA should adapt quickly during early frames (progressive rho)."""
+        norm = TemporalNormalizer(NormalizationConfig(rho=0.95))
+
+        # Simulate track-age warmup: field magnitude increases each frame
+        for i in range(1, 6):
+            scale = i / 5.0  # ramps from 0.2 to 1.0
+            field = np.random.rand(9, 15) * 100 * scale
+            norm.normalize(field)
+
+        # After 5 frames, rho_eff should still be well below target
+        assert norm._effective_rho() < 0.95
+        # But after many frames it should reach target
+        for _ in range(50):
+            norm.normalize(np.random.rand(9, 15) * 100)
+        assert abs(norm._effective_rho() - 0.95) < 0.01
 
 
 class TestQPMapper:

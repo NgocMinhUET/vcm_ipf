@@ -74,6 +74,14 @@ bounded_dynamics:
   qp_min: 10
   qp_max: 51
 
+# --- Baseline Parameters ---
+# Tuned so all methods operate at comparable QP mean levels (~30-33)
+baselines:
+  m5_sigma_factor: 0.75    # Gaussian sigma = factor * object_size
+  m6_alpha: 0.8            # Exponential decay rate (0.8 gives wider spread than old 2.0)
+  m7_cutoff_factor: 2.5    # Distance cutoff = factor * avg_bbox_diagonal
+  m8_blur_factor: 2.0      # Blur sigma = factor * avg_bbox_diagonal
+
 # --- CTU ---
 ctu:
   ctu_size: 128

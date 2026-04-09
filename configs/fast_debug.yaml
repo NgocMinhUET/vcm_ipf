@@ -34,6 +34,12 @@ bounded_dynamics:
   eta: 0.7
   delta_slew: 3.0
 
+baselines:
+  m5_sigma_factor: 0.75
+  m6_alpha: 0.8
+  m7_cutoff_factor: 2.5
+  m8_blur_factor: 2.0
+
 ctu:
   ctu_size: 128
 
