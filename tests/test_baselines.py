@@ -96,8 +96,8 @@ class TestConfigurableParams:
         assert imp_wide.mean() > imp_narrow.mean()
 
     def test_m7_cutoff(self):
-        m_wide = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=5.0)
-        m_narrow = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=1.0)
+        m_wide = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=3.0)
+        m_narrow = M7_DistanceTransform(QP_CFG, CTU_CFG, BD_CFG, cutoff_factor=0.3)
         imp_wide, _ = m_wide.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
         imp_narrow, _ = m_narrow.compute_qp_map(make_objects(), FRAME_H, FRAME_W)
         assert imp_wide.mean() >= imp_narrow.mean()

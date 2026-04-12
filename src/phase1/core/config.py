@@ -40,7 +40,14 @@ class TrackerConfig(BaseModel):
 class FieldConfig(BaseModel):
     beta: float = Field(2.0, description="Distance decay exponent")
     eps_d: float = Field(1e-3, description="Epsilon for distance denominator")
-    eps_k: float = Field(1e-6, description="Epsilon for kernel denominator")
+    eps_k: float = Field(
+        1.0,
+        description="Kernel regularization parameter. Controls the core plateau "
+        "radius of the Cauchy/Lorentzian kernel phi = m/(d^beta + eps_k). "
+        "eps_k=1.0 gives HWHM at d_norm=1 (one object-width). "
+        "WARNING: eps_k << 1 creates delta-function spikes that destroy "
+        "field quality after normalization.",
+    )
     alpha_w: float = Field(0.75, description="Width scaling for normalized distance")
     alpha_h: float = Field(0.75, description="Height scaling for normalized distance")
     superposition: str = Field("sum", description="sum | max")
@@ -89,7 +96,7 @@ class BaselineConfig(BaseModel):
     """Tunable parameters for baseline QP methods.
 
     Defaults are chosen to produce comparable ROI coverage (~25-35% of CTUs)
-    to IPF, ensuring fair comparison at similar operating points.
+    to IPF, ensuring fair comparison at similar operating points (~QP 32).
     """
     m5_sigma_factor: float = Field(
         0.75, gt=0.0,
@@ -98,11 +105,34 @@ class BaselineConfig(BaseModel):
         0.8, gt=0.0,
         description="Exponential decay rate (lower = wider spread)")
     m7_cutoff_factor: float = Field(
-        2.5, gt=0.0,
-        description="Distance cutoff in avg-bbox-diagonal units")
+        0.5, gt=0.0,
+        description="Distance cutoff in avg-bbox-diagonal units "
+        "(0.5 ≈ 1 CTU transition zone for typical pedestrians)")
     m8_blur_factor: float = Field(
-        2.0, gt=0.0,
-        description="Blur sigma in avg-bbox-diagonal units")
+        0.4, gt=0.0,
+        description="Blur sigma in avg-bbox-diagonal units "
+        "(0.4 ≈ ~1 CTU Gaussian spread for typical pedestrians)")
+
+
+class AblationConfig(BaseModel):
+    """Configuration for ablation study.
+
+    Each ablation variant removes or replaces ONE component of the full
+    IPF pipeline (M4) to isolate its contribution.
+
+    Variant definitions:
+        A1: No EMA normalization (per-frame percentile normalize instead)
+        A3: Single strongest object only (no multi-object superposition)
+        A4: Max superposition instead of sum
+        A6: Gaussian kernel replacement (same mass/EMA/bounded, different kernel)
+        M2: Binary ROI + EMA temporal smoothing (tracking-only, no IPF field)
+        M3: IPF spatial field only (no EMA, no bounded dynamics)
+    """
+    enabled: bool = Field(False, description="Include ablation variants in comparison")
+    variants: list[str] = Field(
+        default_factory=lambda: ["A1", "A3", "A4", "A6", "M2", "M3"],
+        description="Ablation variant IDs to include when enabled",
+    )
 
 
 class CTUConfig(BaseModel):
@@ -147,6 +177,7 @@ class IPFConfig(BaseModel):
     qp_mapping: QPMappingConfig = Field(default_factory=QPMappingConfig)
     bounded_dynamics: BoundedDynamicsConfig = Field(default_factory=BoundedDynamicsConfig)
     baselines: BaselineConfig = Field(default_factory=BaselineConfig)
+    ablation: AblationConfig = Field(default_factory=AblationConfig)
     ctu: CTUConfig = Field(default_factory=CTUConfig)
     viz: VizConfig = Field(default_factory=VizConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

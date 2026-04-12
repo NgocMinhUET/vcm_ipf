@@ -20,6 +20,7 @@ tracker:
 
 field:
   beta: 2.0
+  eps_k: 1.0
   superposition: "sum"
 
 normalization:
@@ -37,8 +38,12 @@ bounded_dynamics:
 baselines:
   m5_sigma_factor: 0.75
   m6_alpha: 0.8
-  m7_cutoff_factor: 2.5
-  m8_blur_factor: 2.0
+  m7_cutoff_factor: 0.5
+  m8_blur_factor: 0.4
+
+ablation:
+  enabled: false
+  variants: [A1, A3, A4, A6, M2, M3]
 
 ctu:
   ctu_size: 128

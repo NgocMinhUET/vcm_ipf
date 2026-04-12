@@ -46,7 +46,9 @@ mass:
 field:
   beta: 2.0             # Distance decay exponent
   eps_d: 0.001           # Distance epsilon
-  eps_k: 0.000001        # Kernel epsilon
+  eps_k: 1.0            # Kernel regularization (Cauchy core radius)
+                         # eps_k=1.0 → proper Lorentzian: HWHM at d_norm=1
+                         # WARNING: eps_k << 1 creates delta spikes
   alpha_w: 0.75          # Width scaling
   alpha_h: 0.75          # Height scaling
   superposition: "sum"   # "sum" or "max"
@@ -75,12 +77,23 @@ bounded_dynamics:
   qp_max: 51
 
 # --- Baseline Parameters ---
-# Tuned so all methods operate at comparable QP mean levels (~30-33)
+# Tuned so all methods operate at comparable QP mean levels (~32-33)
 baselines:
   m5_sigma_factor: 0.75    # Gaussian sigma = factor * object_size
-  m6_alpha: 0.8            # Exponential decay rate (0.8 gives wider spread than old 2.0)
-  m7_cutoff_factor: 2.5    # Distance cutoff = factor * avg_bbox_diagonal
-  m8_blur_factor: 2.0      # Blur sigma = factor * avg_bbox_diagonal
+  m6_alpha: 0.8            # Exponential decay rate
+  m7_cutoff_factor: 0.5    # Distance cutoff = factor * avg_bbox_diagonal
+  m8_blur_factor: 0.4      # Blur sigma = factor * avg_bbox_diagonal
+
+# --- Ablation Study ---
+ablation:
+  enabled: false           # Set true or use --ablation CLI flag
+  variants:                # A1=no-EMA, A3=single-obj, A4=max-super,
+    - A1                   # A6=gauss-kernel, M2=tracking-only, M3=spatial-only
+    - A3
+    - A4
+    - A6
+    - M2
+    - M3
 
 # --- CTU ---
 ctu:

@@ -55,20 +55,40 @@ def build_ctu_grid(
     return grid_x, grid_y, n_rows, n_cols
 
 
+def _compute_normalized_distance(
+    obj: ObjectState,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    cfg: FieldConfig,
+) -> np.ndarray:
+    """Compute normalized distance from object center to all CTU positions.
+
+    d_{j,t}(x,y) = sqrt(
+        ((x - x_j) / (alpha_w * w_j + eps_d))^2 +
+        ((y - y_j) / (alpha_h * h_j + eps_d))^2
+    )
+
+    Returns:
+        2D array (n_rows, n_cols) of normalized distances.
+    """
+    dx = (grid_x - obj.x_center) / (cfg.alpha_w * obj.width + cfg.eps_d)
+    dy = (grid_y - obj.y_center) / (cfg.alpha_h * obj.height + cfg.eps_d)
+    return np.sqrt(dx**2 + dy**2)
+
+
 def compute_single_object_field(
     obj: ObjectState,
     grid_x: np.ndarray,
     grid_y: np.ndarray,
     cfg: FieldConfig,
 ) -> np.ndarray:
-    """Compute the field contribution of a single object over the CTU grid.
+    """Compute the IPF (Cauchy/Lorentzian) field for a single object.
 
     phi_{j,t}(x,y) = m_{j,t} / (d_{j,t}(x,y)^beta + eps_k)
 
-    where d_{j,t}(x,y) = sqrt(
-        ((x - x_j) / (alpha_w * w_j + eps_d))^2 +
-        ((y - y_j) / (alpha_h * h_j + eps_d))^2
-    )
+    With eps_k=1.0 and beta=2.0, this is a Cauchy/Lorentzian kernel:
+        - HWHM at d_norm = 1 (one object-width in normalized units)
+        - Power-law tail provides long-range influence beyond Gaussian
 
     Args:
         obj: Object state with position, size, and importance attributes.
@@ -80,13 +100,29 @@ def compute_single_object_field(
         2D array (n_rows, n_cols) of field values from this object.
     """
     mass = compute_importance_mass(obj)
-
-    dx = (grid_x - obj.x_center) / (cfg.alpha_w * obj.width + cfg.eps_d)
-    dy = (grid_y - obj.y_center) / (cfg.alpha_h * obj.height + cfg.eps_d)
-
-    d_norm = np.sqrt(dx**2 + dy**2)
-
+    d_norm = _compute_normalized_distance(obj, grid_x, grid_y, cfg)
     phi = mass / (d_norm**cfg.beta + cfg.eps_k)
+    return phi
+
+
+def compute_single_object_gaussian_field(
+    obj: ObjectState,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    cfg: FieldConfig,
+) -> np.ndarray:
+    """Gaussian kernel alternative for ablation study (A6).
+
+    Uses the same normalized distance and importance mass as IPF,
+    but replaces the Cauchy/Lorentzian kernel with a Gaussian:
+        phi_{j,t}(x,y) = m_{j,t} * exp(-d^2 / 2)
+
+    This isolates the kernel shape's contribution: if IPF > A6,
+    the power-law tail of the Cauchy kernel is beneficial.
+    """
+    mass = compute_importance_mass(obj)
+    d_norm = _compute_normalized_distance(obj, grid_x, grid_y, cfg)
+    phi = mass * np.exp(-d_norm**2 / 2.0)
     return phi
 
 
@@ -134,4 +170,35 @@ def compute_superposition_field(
         float(np.min(total_field)),
         float(np.max(total_field)),
     )
+    return total_field, n_rows, n_cols
+
+
+def compute_gaussian_superposition_field(
+    objects: list[ObjectState],
+    frame_h: int,
+    frame_w: int,
+    field_cfg: FieldConfig,
+    ctu_cfg: CTUConfig,
+) -> tuple[np.ndarray, int, int]:
+    """Gaussian kernel superposition field for ablation A6.
+
+    Same structure as compute_superposition_field but uses Gaussian
+    kernel instead of Cauchy/Lorentzian. Uses the same mass weighting,
+    distance normalization, and superposition mode.
+    """
+    grid_x, grid_y, n_rows, n_cols = build_ctu_grid(frame_h, frame_w, ctu_cfg.ctu_size)
+
+    if not objects:
+        return np.zeros((n_rows, n_cols), dtype=np.float64), n_rows, n_cols
+
+    fields = np.stack(
+        [compute_single_object_gaussian_field(obj, grid_x, grid_y, field_cfg) for obj in objects],
+        axis=0,
+    )
+
+    if field_cfg.superposition == "max":
+        total_field = np.max(fields, axis=0)
+    else:
+        total_field = np.sum(fields, axis=0)
+
     return total_field, n_rows, n_cols

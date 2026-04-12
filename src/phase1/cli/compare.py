@@ -4,6 +4,7 @@ Usage:
     ipf-compare --config configs/default.yaml --video path/to/video.mp4 --run-id comp_001
     ipf-compare --config configs/default.yaml --video path/to/video.mp4 --methods M0,M1,M4,M5
     ipf-compare --config configs/default.yaml --video path/to/video.mp4 --warmup-skip 10
+    ipf-compare --config configs/default.yaml --video path/to/video.mp4 --ablation
 """
 
 from __future__ import annotations
@@ -32,8 +33,16 @@ def main(
         10, "--warmup-skip", "-w",
         help="Frames to skip for steady-state metrics (removes EMA transient)",
     ),
+    ablation: bool = typer.Option(
+        False, "--ablation", "-a",
+        help="Include ablation variants (A1, A3, A4, A6, M2, M3)",
+    ),
 ) -> None:
-    """Run all specified QP methods on the same video and compare."""
+    """Run all specified QP methods on the same video and compare.
+
+    With --ablation flag, also runs ablation variants that each modify
+    ONE component of the IPF pipeline to isolate its contribution.
+    """
     from phase1.core.config import load_config
     from phase1.analysis.comparison_runner import ComparisonPipeline
 
@@ -54,10 +63,18 @@ def main(
         raise typer.Exit(1)
 
     method_list = [m.strip() for m in methods.split(",")]
+
     typer.echo(f"Methods: {method_list}")
+    if ablation:
+        typer.echo(f"Ablation variants: {cfg.ablation.variants}")
     typer.echo(f"Warmup skip: {warmup_skip} frames")
 
-    pipeline = ComparisonPipeline(cfg, methods=method_list, warmup_skip=warmup_skip)
+    pipeline = ComparisonPipeline(
+        cfg,
+        methods=method_list,
+        warmup_skip=warmup_skip,
+        enable_ablation=ablation,
+    )
     pipeline.run()
 
     typer.echo(f"\nDone. Results at: {pipeline.run_dir}")
