@@ -17,11 +17,16 @@ DEVICE="${4:-cpu}"
 
 CONFIG="configs/default.yaml"
 METHODS="M0,M1,M4,M5,M6,M7,M8"
+ABLATION="${5:-}"
 
-CMD="python -m phase1.cli.compare run --config ${CONFIG} --video ${VIDEO} --run-id ${RUN_ID} --device ${DEVICE} --methods ${METHODS}"
+CMD="python -m phase1.cli.compare --config ${CONFIG} --video ${VIDEO} --run-id ${RUN_ID} --device ${DEVICE} --methods ${METHODS}"
 
 if [ -n "${MAX_FRAMES}" ]; then
     CMD="${CMD} --max-frames ${MAX_FRAMES}"
+fi
+
+if [ -n "${ABLATION}" ]; then
+    CMD="${CMD} --ablation"
 fi
 
 echo "=============================================="
@@ -38,6 +43,7 @@ ${CMD}
 
 echo ""
 echo "Results at: ~/ipf_outputs/${RUN_ID}/"
-echo "  - comparison_table.txt    (readable table)"
-echo "  - comparison_summary.json (machine-readable)"
-echo "  - M*/qp_vtm/              (per-method QP maps)"
+echo "  - comparison_table_full.txt   (full sequence metrics)"
+echo "  - comparison_table_steady.txt (steady-state metrics)"
+echo "  - comparison_summary.json     (machine-readable)"
+echo "  - M*/qp_vtm/                 (per-method QP maps)"
