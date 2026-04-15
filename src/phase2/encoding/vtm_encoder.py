@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,40 @@ class VTMEncoder:
         if not self.encoder_cfg.exists():
             raise FileNotFoundError(f"VTM config not found: {self.encoder_cfg}")
 
+        # Build a cleaned copy of the cfg once (remove options removed in VTM-23.4).
+        self._clean_cfg_path = self._make_clean_cfg(self.encoder_cfg)
+
+    # Options that existed in older VTM versions but were removed in VTM-23.x.
+    _DEPRECATED_OPTIONS = {
+        "NumWppThreads",
+        "NumWppExtraLines",
+        "WppBitEqual",
+        "EntropyCodingSyncEnabled",
+    }
+
+    @staticmethod
+    def _make_clean_cfg(src: Path) -> Path:
+        """Return path to a temporary cfg with deprecated options stripped out."""
+        text = src.read_text(encoding="utf-8", errors="replace")
+        clean_lines = []
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            skip = any(
+                stripped.startswith(opt + " ") or stripped.startswith(opt + "\t") or stripped == opt
+                for opt in VTMEncoder._DEPRECATED_OPTIONS
+            )
+            if not skip:
+                clean_lines.append(line)
+        cleaned = "\n".join(clean_lines) + "\n"
+
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix="_vtm_clean.cfg", delete=False, encoding="utf-8"
+        )
+        tmp.write(cleaned)
+        tmp.close()
+        logger.debug("Clean VTM cfg written to %s", tmp.name)
+        return Path(tmp.name)
+
     def encode(
         self,
         input_yuv: str,
@@ -96,11 +131,8 @@ class VTMEncoder:
 
         cmd = [
             str(self.encoder_path),
-            "-c", str(self.encoder_cfg),
-            # Treat unknown cfg file options as warnings, not errors.
-            # Needed because some packaged .cfg files contain options that were
-            # removed between VTM versions (e.g. NumWppThreads, NumWppExtraLines).
-            "-w",
+            # Use the pre-cleaned cfg (deprecated options already stripped).
+            "-c", str(self._clean_cfg_path),
             "-i", str(input_path),
             "-b", str(bs_path),
             "-o", str(recon_path),
