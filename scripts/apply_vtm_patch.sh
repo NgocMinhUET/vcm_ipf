@@ -340,14 +340,14 @@ cd "${BUILD_DIR}"
 NPROC=$(nproc 2>/dev/null || echo 4)
 make -j"${NPROC}"
 
-# VTM cmake places binaries in build/bin/umake/<compiler>/<arch>/release/
-# Use find to locate them regardless of gcc version.
-ENCODER=$(find "${BUILD_DIR}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
-DECODER=$(find "${BUILD_DIR}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
+# VTM cmake outputs binaries to VTM_DIR/bin/umake/<gcc>/<arch>/release/
+# (NOT under BUILD_DIR). Search the VTM source root directory.
+ENCODER=$(find "${VTM_DIR}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
+DECODER=$(find "${VTM_DIR}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
 
 if [ -z "${ENCODER}" ] || [ ! -f "${ENCODER}" ]; then
     echo ""
-    echo "BUILD FAILED: EncoderApp binary not found under ${BUILD_DIR}"
+    echo "BUILD FAILED: EncoderApp binary not found under ${VTM_DIR}"
     echo "Check compiler errors above."
     exit 1
 fi

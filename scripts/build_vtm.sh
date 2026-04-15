@@ -66,14 +66,16 @@ NPROC=$(nproc 2>/dev/null || echo 4)
 make -j"${NPROC}"
 
 echo "[4/4] Verifying build..."
-# VTM cmake places binaries in build/bin/umake/<compiler>/<arch>/release/
-# Use find to locate them robustly regardless of gcc version string.
-ENCODER=$(find "${BUILD_DIR}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
-DECODER=$(find "${BUILD_DIR}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
+# VTM cmake outputs binaries relative to the VTM SOURCE root, e.g.:
+#   VTM_DIR/bin/umake/gcc-11.4/x86_64/release/EncoderApp
+# NOT under BUILD_DIR. Search from VTM_DIR to cover all gcc versions.
+VTM_ROOT="${INSTALL_DIR}/VVCSoftware_VTM"
+ENCODER=$(find "${VTM_ROOT}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
+DECODER=$(find "${VTM_ROOT}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
 
 if [ -z "${ENCODER}" ] || [ ! -f "${ENCODER}" ]; then
-    echo "ERROR: EncoderApp not found under ${BUILD_DIR}"
-    echo "Expected location: ${BUILD_DIR}/bin/umake/<gcc-version>/x86_64/release/EncoderApp"
+    echo "ERROR: EncoderApp not found under ${VTM_ROOT}"
+    echo "Expected: ${VTM_ROOT}/bin/umake/<gcc-version>/x86_64/release/EncoderApp"
     exit 1
 fi
 if [ -z "${DECODER}" ] || [ ! -f "${DECODER}" ]; then

@@ -12,10 +12,11 @@ output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 
 vtm:
-  # VTM cmake places binaries under build/bin/umake/<gcc-version>/<arch>/release/
-  # Verify with: find ~/Minh/ipf/vtm/VVCSoftware_VTM/build -name EncoderApp -type f
-  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/build/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
-  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/build/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
+  # VTM cmake places binaries under VTM_DIR/bin/umake/<gcc-version>/<arch>/release/
+  # (NOT under build/bin — the output dir is relative to the VTM source root)
+  # Confirmed path on server: ~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
   encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
   internal_bit_depth: 8
   threads: 1
