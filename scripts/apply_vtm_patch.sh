@@ -2,13 +2,13 @@
 # =============================================================================
 # Apply External QP Map Patch to VTM
 # =============================================================================
-# This script applies the IPF external QP reader patch to the VTM source,
-# then rebuilds the encoder. The patch is applied by:
-#   1. Copying the ExternalQPReader header to VTM source
-#   2. Patching EncCfg.h to add the QP map directory config
-#   3. Patching EncAppCfg.cpp to add the CLI parameter
-#   4. Patching EncSlice.cpp to read and apply external QP per CTU
-#   5. Rebuilding VTM
+# Applies the IPF external per-CTU QP reader patch to VTM source and rebuilds.
+#
+# Changes:
+#   1. EncCfg.h         — adds m_externalQPMapDir member INSIDE the class
+#   2. EncAppCfg.cpp    — adds --ExternalQPMapDir CLI option
+#   3. EncSlice.cpp     — reads QP maps and overrides per-CTU QP in the
+#                         compressSlice CTU loop (before compressCtu call)
 #
 # Usage:
 #   bash scripts/apply_vtm_patch.sh
@@ -30,8 +30,18 @@ echo "======================================================"
 echo "Applying External QP Map Patch to VTM"
 echo "======================================================"
 echo "VTM source: ${VTM_DIR}"
-echo "Patch dir:  ${PATCH_DIR}"
 echo "======================================================"
+
+# ---------------------------------------------------------------------------
+# Reset any previous (broken) patch to get a clean slate
+# ---------------------------------------------------------------------------
+echo "[0/5] Resetting modified VTM source files to original state..."
+cd "${VTM_DIR}"
+git checkout source/Lib/EncoderLib/EncCfg.h 2>/dev/null || true
+git checkout source/Lib/EncoderLib/EncSlice.cpp 2>/dev/null || true
+git checkout source/App/EncoderApp/EncAppCfg.cpp 2>/dev/null || true
+rm -f source/Lib/EncoderLib/ExternalQPReader.h
+echo "  Reset complete."
 
 # ---------------------------------------------------------------------------
 # Step 1: Copy ExternalQPReader header
@@ -39,30 +49,52 @@ echo "======================================================"
 echo "[1/5] Copying ExternalQPReader.h..."
 cp "${PATCH_DIR}/external_qp_reader.h" \
    "${VTM_DIR}/source/Lib/EncoderLib/ExternalQPReader.h"
+echo "  Done."
 
 # ---------------------------------------------------------------------------
-# Step 2: Patch EncCfg.h — add m_externalQPMapDir member
+# Step 2: Patch EncCfg.h — add m_externalQPMapDir INSIDE the class body
 # ---------------------------------------------------------------------------
-echo "[2/5] Patching EncCfg.h..."
+echo "[2/5] Patching EncCfg.h (inserting member inside class)..."
 ENCCFG_H="${VTM_DIR}/source/Lib/EncoderLib/EncCfg.h"
 
-if grep -q "m_externalQPMapDir" "${ENCCFG_H}"; then
-    echo "  Already patched, skipping..."
-else
-    # Find the last 'protected:' block and add our member before the closing };
-    # We add near other string members for clarity
-    cat >> "${ENCCFG_H}" << 'PATCH_ENCCFG'
+python3 << PYEOF
+import re, sys
 
-// === IPF External QP Map Patch ===
-#include <string>
+path = "${ENCCFG_H}"
+with open(path, 'r') as f:
+    content = f.read()
+
+# We insert the member and accessors just before the LAST '};\n' in the file,
+# which closes the EncCfg class definition.
+ipf_block = """
+protected:
+  // === IPF: External per-CTU QP map directory ===
+  std::string   m_externalQPMapDir;
 public:
-  std::string m_externalQPMapDir;
-  void        setExternalQPMapDir(const std::string& dir) { m_externalQPMapDir = dir; }
-  std::string getExternalQPMapDir() const { return m_externalQPMapDir; }
-// === End IPF Patch ===
-PATCH_ENCCFG
-    echo "  Patched EncCfg.h"
-fi
+  void          setExternalQPMapDir(const std::string& d) { m_externalQPMapDir = d; }
+  std::string   getExternalQPMapDir()               const { return m_externalQPMapDir; }
+  // === End IPF ===
+"""
+
+# Find the last occurrence of "};" which closes the EncCfg class.
+last_close = content.rfind('};')
+if last_close == -1:
+    print("ERROR: Could not find closing '}; in EncCfg.h", file=sys.stderr)
+    sys.exit(1)
+
+# Sanity check: make sure we have not already patched.
+if 'm_externalQPMapDir' in content:
+    print("  Already patched, skipping.")
+    sys.exit(0)
+
+# Insert the IPF block before the last '};'
+content = content[:last_close] + ipf_block + '\n' + content[last_close:]
+
+with open(path, 'w') as f:
+    f.write(content)
+
+print("  EncCfg.h patched OK — member inserted inside class body.")
+PYEOF
 
 # ---------------------------------------------------------------------------
 # Step 3: Patch EncAppCfg.cpp — add --ExternalQPMapDir CLI option
@@ -70,159 +102,142 @@ fi
 echo "[3/5] Patching EncAppCfg.cpp..."
 ENCAPPCFG="${VTM_DIR}/source/App/EncoderApp/EncAppCfg.cpp"
 
-if grep -q "ExternalQPMapDir" "${ENCAPPCFG}"; then
-    echo "  Already patched, skipping..."
-else
-    # Create a temporary patch file
-    cat > /tmp/encappcfg_patch.py << 'PYEOF'
+python3 << PYEOF
 import sys
 
-filepath = sys.argv[1]
-with open(filepath, 'r') as f:
+path = "${ENCAPPCFG}"
+with open(path, 'r') as f:
     content = f.read()
 
-# 1. Add the string variable declaration near other string declarations
-# Find a good insertion point: after the line with "string cfg_InputFile"
-insert_var = '\n  string cfg_ExternalQPMapDir;  // IPF: directory with per-CTU QP maps\n'
+if 'ExternalQPMapDir' in content:
+    print("  Already patched, skipping.")
+    sys.exit(0)
 
-# Look for the bitstreamFile option registration as anchor
-anchor = '"BitstreamFile"'
-if anchor in content:
-    pos = content.find(anchor)
-    # Find the end of that line
-    eol = content.find('\n', pos)
-    # Add our option registration after the bitstream file option block
-    # Find the next opts.addOptions() call or similar pattern
-    insert_opt = """
-  // === IPF External QP Map ===
-  ("ExternalQPMapDir",                                cfg_ExternalQPMapDir,                    string(""), "Directory containing per-CTU QP map files (qp_NNNNNN.txt)")
-"""
-    # Insert after the BitstreamFile line group
-    line_end = content.find('\n', eol + 1)
-    content = content[:line_end] + insert_opt + content[line_end:]
+# --- (a) Register the option ---
+# Find the "BitstreamFile" registration as an anchor (it always exists).
+anchor_opt = '"BitstreamFile"'
+pos = content.find(anchor_opt)
+if pos == -1:
+    print("WARNING: Could not find BitstreamFile anchor in EncAppCfg.cpp", file=sys.stderr)
+    sys.exit(0)
+eol = content.find('\n', pos)
+# Insert on the next line after the BitstreamFile group.
+eol2 = content.find('\n', eol + 1)
+opt_line = '\n  ("ExternalQPMapDir",  m_externalQPMapDir, std::string(""), "Directory with per-CTU QP maps (qp_NNNNNN.txt)")\n'
+content = content[:eol2 + 1] + opt_line + content[eol2 + 1:]
 
-# 2. Add the config transfer (cfg -> EncCfg object)
-# Find "m_inputFileName" assignment as anchor
-anchor2 = 'm_inputFileName'
-if anchor2 in content:
-    pos2 = content.find(anchor2)
-    eol2 = content.find('\n', pos2)
-    transfer = '\n  m_externalQPMapDir = cfg_ExternalQPMapDir;  // IPF patch\n'
-    content = content[:eol2+1] + transfer + content[eol2+1:]
+# --- (b) Wire to EncCfg ---
+# Find the place where other m_xxx members are transferred to the encoder.
+# A reliable anchor is "m_inputFileName" assignment.
+anchor_cfg = 'm_inputFileName'
+pos2 = content.find(anchor_cfg)
+if pos2 != -1:
+    eol3 = content.find('\n', pos2)
+    wire_line = '\n  m_cEncLib.setExternalQPMapDir( m_externalQPMapDir );  // IPF\n'
+    content = content[:eol3 + 1] + wire_line + content[eol3 + 1:]
 
-with open(filepath, 'w') as f:
+# --- (c) Add the string member declaration ---
+# Find "string m_bitstreamFileName" as anchor for member variables.
+anchor_mem = 'm_bitstreamFileName'
+pos3 = content.find(anchor_mem)
+if pos3 != -1:
+    eol4 = content.find('\n', pos3)
+    mem_line = '\n  std::string  m_externalQPMapDir;  // IPF external QP map directory\n'
+    content = content[:eol4 + 1] + mem_line + content[eol4 + 1:]
+
+with open(path, 'w') as f:
     f.write(content)
 
-print("  Patched EncAppCfg.cpp")
+print("  EncAppCfg.cpp patched OK.")
 PYEOF
 
-    python3 /tmp/encappcfg_patch.py "${ENCAPPCFG}"
-fi
-
 # ---------------------------------------------------------------------------
-# Step 4: Patch EncSlice.cpp — read and apply external QP per CTU
+# Step 4: Patch EncSlice.cpp — add include, global reader, and CTU QP override
 # ---------------------------------------------------------------------------
 echo "[4/5] Patching EncSlice.cpp..."
 ENCSLICE="${VTM_DIR}/source/Lib/EncoderLib/EncSlice.cpp"
 
-if grep -q "ExternalQPReader" "${ENCSLICE}"; then
-    echo "  Already patched, skipping..."
-else
-    cat > /tmp/encslice_patch.py << 'PYEOF'
-import sys
+python3 << PYEOF
+import sys, re
 
-filepath = sys.argv[1]
-with open(filepath, 'r') as f:
+path = "${ENCSLICE}"
+with open(path, 'r') as f:
     content = f.read()
+
+if 'ExternalQPReader' in content:
+    print("  Already patched, skipping.")
+    sys.exit(0)
+
 lines = content.split('\n')
 
-# 1. Add include at top (after last #include)
-last_include_idx = 0
-for i, line in enumerate(lines):
-    if line.strip().startswith('#include'):
-        last_include_idx = i
-
-include_line = '#include "ExternalQPReader.h"  // IPF: external per-CTU QP maps'
-lines.insert(last_include_idx + 1, include_line)
-
-# 2. Add static ExternalQPReader instance after includes
-lines.insert(last_include_idx + 2, '')
-lines.insert(last_include_idx + 3, '// IPF: static reader for external QP maps')
-lines.insert(last_include_idx + 4, 'static ExternalQPReader g_externalQPReader;')
-lines.insert(last_include_idx + 5, 'static bool g_externalQPReaderInitialized = false;')
-lines.insert(last_include_idx + 6, '')
-
+# --- (a) Add #include after the last #include in the file ---
+last_inc = 0
+for i, ln in enumerate(lines):
+    if ln.strip().startswith('#include'):
+        last_inc = i
+lines.insert(last_inc + 1, '#include "ExternalQPReader.h"  // IPF')
+lines.insert(last_inc + 2, '')
+lines.insert(last_inc + 3, '// IPF: singleton QP map reader (initialised once per encode session)')
+lines.insert(last_inc + 4, 'static ExternalQPReader g_ipfQPReader;')
+lines.insert(last_inc + 5, 'static bool             g_ipfQPReaderInit = false;')
+lines.insert(last_inc + 6, '')
 content = '\n'.join(lines)
 
-# 3. Find compressSlice and add QP override logic
-# We need to find where per-CTU QP is set in compressSlice
-# The key function is compressCtu or the loop over CTUs
-# In VTM, the CTU loop in EncSlice::compressSlice sets encTestMode QP
-
-# Strategy: find "compressSlice" function, then find the CTU loop,
-# and add our QP override after the base QP is determined.
-
-# We'll add initialization of the reader at the start of compressSlice
-init_block = """
-  // === IPF: Initialize external QP reader ===
-  if (!g_externalQPReaderInitialized && !m_pcCfg->getExternalQPMapDir().empty())
+# --- (b) Initialise reader at start of compressSlice ---
+marker = 'EncSlice::compressSlice'
+pos = content.find(marker)
+if pos == -1:
+    print("ERROR: compressSlice not found in EncSlice.cpp", file=sys.stderr)
+    sys.exit(1)
+open_brace = content.find('{', pos)
+init_code = r"""
+  // === IPF: initialise external QP reader ===
+  if (!g_ipfQPReaderInit && !m_pcCfg->getExternalQPMapDir().empty())
   {
-    g_externalQPReader.setDir(m_pcCfg->getExternalQPMapDir());
-    g_externalQPReaderInitialized = true;
+    g_ipfQPReader.setDir(m_pcCfg->getExternalQPMapDir());
+    g_ipfQPReaderInit = true;
   }
   // === End IPF init ===
 """
+content = content[:open_brace + 1] + init_code + content[open_brace + 1:]
 
-# Find compressSlice function body
-compress_marker = 'EncSlice::compressSlice'
-pos = content.find(compress_marker)
-if pos != -1:
-    # Find the opening brace of the function
-    brace_pos = content.find('{', pos)
-    if brace_pos != -1:
-        content = content[:brace_pos+1] + init_block + content[brace_pos+1:]
+# --- (c) Inject per-CTU QP override before every compressCtu() call ---
+# Pattern: 'm_pcCuEncoder->compressCtu('  appears in the CTU loop.
+# We insert the QP override block immediately before each such call.
+ctu_qp_override = (
+    '  // === IPF: per-CTU QP override from external map ===\n'
+    '  if (g_ipfQPReader.isEnabled())\n'
+    '  {\n'
+    '    int _ctuRow = ctuRsAddr / cs.pcv->widthInCtus;\n'
+    '    int _ctuCol = ctuRsAddr % cs.pcv->widthInCtus;\n'
+    '    int _extQP  = g_ipfQPReader.getQP(cs.slice->getPOC(), _ctuRow, _ctuCol, actualQP[CHANNEL_TYPE_LUMA]);\n'
+    '    actualQP[CHANNEL_TYPE_LUMA] = _extQP;\n'
+    '    prevQP  [CHANNEL_TYPE_LUMA] = _extQP;\n'
+    '  }\n'
+    '  // === End IPF CTU QP override ===\n'
+)
 
-# 4. Find where QP is assigned per CTU and add override
-# In VTM, look for initEncSlice or where iQP/sliceQP is set for CTUs
-# The typical pattern is in compressCtu or encodeCtus
-# We target the point where the slice QP or CTU QP is finalized
+# Replace the first (and usually only) compressCtu call in compressSlice.
+# We locate the call and inject just before it.
+call_pattern = re.compile(r'( +)(m_pcCuEncoder->compressCtu\s*\()')
+match = call_pattern.search(content, open_brace)
+if match:
+    insert_pos = match.start()
+    content = content[:insert_pos] + ctu_qp_override + content[insert_pos:]
+    print("  EncSlice.cpp: CTU QP override injected before compressCtu().")
+else:
+    print("  WARNING: compressCtu() call not found; CTU QP override NOT injected.")
+    print("  The encoder will build but external QP maps will have no effect.")
+    print("  Manual inspection of EncSlice.cpp required.")
 
-# Add a helper function that wraps the QP override
-helper = """
-
-// === IPF: Apply external QP to CTU ===
-static int ipf_getExternalCtuQP(int poc, int ctuRsAddr, int picWidthInCtus, int defaultQP)
-{
-  if (!g_externalQPReader.isEnabled())
-  {
-    return defaultQP;
-  }
-  int ctuRow = ctuRsAddr / picWidthInCtus;
-  int ctuCol = ctuRsAddr % picWidthInCtus;
-  return g_externalQPReader.getQP(poc, ctuRow, ctuCol, defaultQP);
-}
-// === End IPF helper ===
-"""
-
-# Insert helper before compressSlice
-pos2 = content.find(compress_marker)
-if pos2 != -1:
-    # Find the start of the function (go backwards to find return type)
-    line_start = content.rfind('\n', 0, pos2)
-    content = content[:line_start] + helper + content[line_start:]
-
-with open(filepath, 'w') as f:
+with open(path, 'w') as f:
     f.write(content)
 
-print("  Patched EncSlice.cpp with ExternalQPReader integration")
-print("  NOTE: Manual verification recommended for CTU QP injection point")
+print("  EncSlice.cpp patched OK.")
 PYEOF
 
-    python3 /tmp/encslice_patch.py "${ENCSLICE}"
-fi
-
 # ---------------------------------------------------------------------------
-# Step 5: Rebuild VTM with patch
+# Step 5: Rebuild VTM
 # ---------------------------------------------------------------------------
 echo "[5/5] Rebuilding VTM..."
 cd "${BUILD_DIR}"
@@ -231,7 +246,8 @@ make -j"${NPROC}"
 
 ENCODER="${BUILD_DIR}/source/App/EncoderApp/EncoderApp"
 if [ ! -f "${ENCODER}" ]; then
-    echo "ERROR: Build failed, EncoderApp not found"
+    echo ""
+    echo "BUILD FAILED. Review errors above."
     exit 1
 fi
 
@@ -241,12 +257,11 @@ echo "VTM Patch Applied and Rebuilt Successfully!"
 echo "======================================================"
 echo "Encoder: ${ENCODER}"
 echo ""
-echo "Usage example:"
-echo "  ${ENCODER} -c encoder_lowdelay_vtm.cfg \\"
-echo "    -i input.yuv -b output.bin -o recon.yuv \\"
-echo "    -wdt 1920 -hgt 1080 -q 32 -f 100 \\"
+echo "Test with external QP maps:"
+echo "  ${ENCODER} -c <cfg> -i input.yuv -b out.bin -o recon.yuv \\"
+echo "    -wdt 1920 -hgt 1088 -q 32 -f 100 \\"
 echo "    --ExternalQPMapDir=/path/to/qp_maps/"
 echo ""
-echo "To verify compliance, decode with UNMODIFIED VTM:"
-echo "  DecoderApp -b output.bin -o decoded.yuv"
+echo "Compliance check (decode with UNMODIFIED decoder):"
+echo "  DecoderApp -b out.bin -o decoded.yuv"
 echo "======================================================"
