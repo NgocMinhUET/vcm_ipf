@@ -157,10 +157,15 @@ PYEOF
 echo "[4/5] Patching EncSlice.cpp..."
 ENCSLICE="${VTM_DIR}/source/Lib/EncoderLib/EncSlice.cpp"
 
-python3 << PYEOF
-import sys, re
+export ENCSLICE_PATH="${ENCSLICE}"
+python3 << 'PYEOF'
+import sys, re, os
 
-path = "${ENCSLICE}"
+path = os.environ.get('ENCSLICE_PATH', '')
+if not path:
+    print("ERROR: ENCSLICE_PATH not set", file=sys.stderr)
+    sys.exit(1)
+
 with open(path, 'r') as f:
     content = f.read()
 
@@ -170,12 +175,14 @@ if 'ExternalQPReader' in content:
 
 lines = content.split('\n')
 
-# --- (a) Add #include after the last #include in the file ---
+# -------------------------------------------------------------------------
+# (a) Add #include and globals after the last #include in the file
+# -------------------------------------------------------------------------
 last_inc = 0
 for i, ln in enumerate(lines):
     if ln.strip().startswith('#include'):
         last_inc = i
-lines.insert(last_inc + 1, '#include "ExternalQPReader.h"  // IPF')
+lines.insert(last_inc + 1, '#include "ExternalQPReader.h"  // IPF: external per-CTU QP maps')
 lines.insert(last_inc + 2, '')
 lines.insert(last_inc + 3, '// IPF: singleton QP map reader (initialised once per encode session)')
 lines.insert(last_inc + 4, 'static ExternalQPReader g_ipfQPReader;')
@@ -183,15 +190,17 @@ lines.insert(last_inc + 5, 'static bool             g_ipfQPReaderInit = false;')
 lines.insert(last_inc + 6, '')
 content = '\n'.join(lines)
 
-# --- (b) Initialise reader at start of compressSlice ---
-marker = 'EncSlice::compressSlice'
-pos = content.find(marker)
+# -------------------------------------------------------------------------
+# (b) Initialise reader at the start of compressSlice()
+# -------------------------------------------------------------------------
+compress_marker = 'EncSlice::compressSlice'
+pos = content.find(compress_marker)
 if pos == -1:
     print("ERROR: compressSlice not found in EncSlice.cpp", file=sys.stderr)
     sys.exit(1)
 open_brace = content.find('{', pos)
-init_code = r"""
-  // === IPF: initialise external QP reader ===
+init_code = """
+  // === IPF: initialise external QP reader once ===
   if (!g_ipfQPReaderInit && !m_pcCfg->getExternalQPMapDir().empty())
   {
     g_ipfQPReader.setDir(m_pcCfg->getExternalQPMapDir());
@@ -201,34 +210,52 @@ init_code = r"""
 """
 content = content[:open_brace + 1] + init_code + content[open_brace + 1:]
 
-# --- (c) Inject per-CTU QP override before every compressCtu() call ---
-# Pattern: 'm_pcCuEncoder->compressCtu('  appears in the CTU loop.
-# We insert the QP override block immediately before each such call.
+# -------------------------------------------------------------------------
+# (c) Per-CTU QP override injected before EVERY compressCtu() call.
+#
+# KEY FIX: In VTM-23.4 compressCtu is called from encodeCtus(), not from
+# compressSlice() directly.  The local variable names in encodeCtus() differ
+# from those in compressSlice(), so we MUST NOT reference actualQP or
+# CHANNEL_TYPE_LUMA (which may not exist in that scope).
+#
+# Safe variables always in scope inside the CTU loop of any EncSlice function:
+#   ctuRsAddr              - uint32_t  (loop variable)
+#   cs.pcv->widthInCtus    - uint32_t  (available via CodingStructure)
+#   cs.slice->getPOC()     - int       (always available)
+#   cs.slice->getSliceQp() - int       (base slice QP, always available)
+#   cs.slice->setSliceQp() - void      (setter, always available)
+#
+# The override works by temporarily setting the slice QP to the external value
+# before each CTU is encoded.  VTM's CTU encoder reads the slice QP from the
+# slice object at encoding time, so this is the correct hook point.
+# -------------------------------------------------------------------------
 ctu_qp_override = (
     '  // === IPF: per-CTU QP override from external map ===\n'
     '  if (g_ipfQPReader.isEnabled())\n'
     '  {\n'
-    '    int _ctuRow = ctuRsAddr / cs.pcv->widthInCtus;\n'
-    '    int _ctuCol = ctuRsAddr % cs.pcv->widthInCtus;\n'
-    '    int _extQP  = g_ipfQPReader.getQP(cs.slice->getPOC(), _ctuRow, _ctuCol, actualQP[CHANNEL_TYPE_LUMA]);\n'
-    '    actualQP[CHANNEL_TYPE_LUMA] = _extQP;\n'
-    '    prevQP  [CHANNEL_TYPE_LUMA] = _extQP;\n'
+    '    const int _ctuRow = (int)(ctuRsAddr / cs.pcv->widthInCtus);\n'
+    '    const int _ctuCol = (int)(ctuRsAddr % cs.pcv->widthInCtus);\n'
+    '    const int _baseQP = cs.slice->getSliceQp();\n'
+    '    const int _extQP  = g_ipfQPReader.getQP(\n'
+    '      (int)cs.slice->getPOC(), _ctuRow, _ctuCol, _baseQP);\n'
+    '    cs.slice->setSliceQp(_extQP);\n'
     '  }\n'
     '  // === End IPF CTU QP override ===\n'
 )
 
-# Replace the first (and usually only) compressCtu call in compressSlice.
-# We locate the call and inject just before it.
-call_pattern = re.compile(r'( +)(m_pcCuEncoder->compressCtu\s*\()')
-match = call_pattern.search(content, open_brace)
-if match:
-    insert_pos = match.start()
-    content = content[:insert_pos] + ctu_qp_override + content[insert_pos:]
-    print("  EncSlice.cpp: CTU QP override injected before compressCtu().")
+# Inject before EVERY call to compressCtu() in the file (covers both
+# compressSlice and encodeCtus if either calls it).
+call_pattern = re.compile(r'(?m)^( *)(m_pcCuEncoder->compressCtu\s*\()')
+new_content = call_pattern.sub(lambda m: ctu_qp_override + m.group(0), content)
+
+if new_content == content:
+    print("  WARNING: compressCtu() call not found — CTU QP override NOT injected.")
+    print("  Encoder will build but external QP maps will have no effect.")
+    print("  Inspect EncSlice.cpp manually and check the compressCtu call site.")
 else:
-    print("  WARNING: compressCtu() call not found; CTU QP override NOT injected.")
-    print("  The encoder will build but external QP maps will have no effect.")
-    print("  Manual inspection of EncSlice.cpp required.")
+    n_injections = len(call_pattern.findall(content))
+    print(f"  CTU QP override injected before {n_injections} compressCtu() call(s).")
+    content = new_content
 
 with open(path, 'w') as f:
     f.write(content)
