@@ -97,6 +97,10 @@ class VTMEncoder:
         cmd = [
             str(self.encoder_path),
             "-c", str(self.encoder_cfg),
+            # Treat unknown cfg file options as warnings, not errors.
+            # Needed because some packaged .cfg files contain options that were
+            # removed between VTM versions (e.g. NumWppThreads, NumWppExtraLines).
+            "-w",
             "-i", str(input_path),
             "-b", str(bs_path),
             "-o", str(recon_path),
@@ -106,8 +110,6 @@ class VTMEncoder:
             "-f", str(n_frames),
             "-fr", str(fps),
             f"--InternalBitDepth={self.internal_bit_depth}",
-            f"--NumWppThreads={self.threads}",
-            f"--NumWppExtraLines={self.threads}",
         ]
 
         if external_qp_dir:

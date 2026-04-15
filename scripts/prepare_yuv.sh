@@ -23,6 +23,10 @@ CONVERTER="${SCRIPT_DIR}/frames_to_yuv.sh"
 
 mkdir -p "${OUTPUT_DIR}"
 
+# MOT17 extraction layout: <MOT17_ROOT>/MOT17/train/<seq>/img1/
+# Also check <MOT17_ROOT>/<seq>/img1/ as a direct fallback.
+MOT17_TRAIN="${MOT17_ROOT}/MOT17/train"
+
 # Pilot sequences from pilot.yaml
 declare -A SEQUENCES=(
     ["MOT17-04-DPM"]="1920 1080"
@@ -46,7 +50,6 @@ for SEQ in "${!SEQUENCES[@]}"; do
     WH="${SEQUENCES[$SEQ]}"
     W="${WH%% *}"
     H="${WH##* }"
-    FRAMES_DIR="${MOT17_ROOT}/${SEQ}/img1"
     OUTPUT_YUV="${OUTPUT_DIR}/${SEQ}.yuv"
 
     echo ""
@@ -54,8 +57,15 @@ for SEQ in "${!SEQUENCES[@]}"; do
     echo "Sequence: ${SEQ}  (${W}x${H})"
     echo "------------------------------------------------------"
 
+    # Resolve frame directory: try standard MOT17 layout first, then flat layout.
+    FRAMES_DIR="${MOT17_TRAIN}/${SEQ}/img1"
     if [ ! -d "${FRAMES_DIR}" ]; then
-        echo "  SKIP: frames dir not found: ${FRAMES_DIR}"
+        FRAMES_DIR="${MOT17_ROOT}/${SEQ}/img1"
+    fi
+    if [ ! -d "${FRAMES_DIR}" ]; then
+        echo "  SKIP: frames dir not found."
+        echo "        Tried: ${MOT17_TRAIN}/${SEQ}/img1"
+        echo "        Tried: ${MOT17_ROOT}/${SEQ}/img1"
         SKIPPED=$((SKIPPED + 1))
         continue
     fi

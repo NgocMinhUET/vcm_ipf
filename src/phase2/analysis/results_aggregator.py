@@ -89,7 +89,7 @@ class ResultsAggregator:
         self.experiment_dir = Path(experiment_dir).expanduser()
         self.anchor_method = anchor_method
 
-    def analyze(self) -> Dict:
+    def analyze(self, output_dir: Optional[str] = None) -> Dict:
         """Run the full analysis pipeline."""
         print(f"Loading results from: {self.experiment_dir}")
 
@@ -104,7 +104,10 @@ class ResultsAggregator:
         aggregated = self._aggregate_bd(bd_results)
         stat_tests = self._run_statistical_tests(aggregated)
 
-        report_dir = self.experiment_dir / "analysis"
+        if output_dir:
+            report_dir = Path(output_dir).expanduser()
+        else:
+            report_dir = self.experiment_dir / "analysis"
         report_dir.mkdir(parents=True, exist_ok=True)
 
         self._write_bd_table(aggregated, report_dir / "bd_rate_table.txt")
@@ -507,10 +510,14 @@ def main() -> None:
         "--anchor", type=str, default="M0",
         help="Anchor method for BD-Rate computation (default: M0)",
     )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Directory for analysis outputs (default: <experiment-dir>/analysis)",
+    )
     args = parser.parse_args()
 
     agg = ResultsAggregator(args.experiment_dir, anchor_method=args.anchor)
-    agg.analyze()
+    agg.analyze(output_dir=args.output_dir)
 
 
 if __name__ == "__main__":

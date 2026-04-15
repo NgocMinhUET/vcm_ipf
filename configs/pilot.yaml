@@ -30,7 +30,7 @@ sequences:
     original_height: 1080
     fps: 30
     n_frames: 200
-    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-04-DPM/img1"
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
 
   - name: "MOT17-02-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
@@ -40,7 +40,7 @@ sequences:
     original_height: 1080
     fps: 30
     n_frames: 200
-    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-02-DPM/img1"
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
 
   - name: "MOT17-09-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
@@ -50,7 +50,7 @@ sequences:
     original_height: 1080
     fps: 30
     n_frames: 200
-    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-09-DPM/img1"
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
 
 encoding:
   qp_points: [22, 27, 32, 37]
