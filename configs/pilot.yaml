@@ -22,10 +22,12 @@ vtm:
   threads: 1
 
 sequences:
+  # Height is CTU-128 aligned: ceil(1080/128)*128 = 1152
+  # frames_to_yuv.sh pads with black to reach this size.
   - name: "MOT17-04-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
     width: 1920
-    height: 1088
+    height: 1152
     original_width: 1920
     original_height: 1080
     fps: 30
@@ -35,7 +37,7 @@ sequences:
   - name: "MOT17-02-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
     width: 1920
-    height: 1088
+    height: 1152
     original_width: 1920
     original_height: 1080
     fps: 30
@@ -45,7 +47,7 @@ sequences:
   - name: "MOT17-09-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
     width: 1920
-    height: 1088
+    height: 1152
     original_width: 1920
     original_height: 1080
     fps: 30
