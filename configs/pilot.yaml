@@ -1,0 +1,65 @@
+# =============================================================================
+# Phase 2 Pilot Experiment Configuration
+# =============================================================================
+# Pilot grid for initial VTM encoding experiments.
+# Uses 4 QP points x 5 methods x 3 sequences = 60 encoding runs.
+#
+# Aligned with 04_EXPERIMENT_MATRIX.md section C.1 (Pilot Grid).
+# =============================================================================
+
+experiment_id: "pilot_v1"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/build/source/App/EncoderApp/EncoderApp"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/build/source/App/DecoderApp/DecoderApp"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1088
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 200
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-04-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1088
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 200
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-02-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1088
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 200
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17-09-DPM/img1"
+
+encoding:
+  qp_points: [22, 27, 32, 37]
+  methods: ["M0", "M1", "M4", "M5", "M6"]
+  phase1_output_dir: "~/ipf_outputs"
+  phase1_run_prefix: "multi_seq_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1

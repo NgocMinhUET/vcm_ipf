@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.whl
+
+# Outputs (large, generated on server)
+outputs/
+phase2_outputs/
+*.yuv
+*.bin
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
