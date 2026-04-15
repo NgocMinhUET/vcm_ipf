@@ -26,7 +26,16 @@ MAX_FRAMES="${2:-200}"
 CONFIG="configs/ipf_v2.yaml"
 METHODS="M0,M1,M4,M5,M6,M7,M8"
 WARMUP_SKIP=10
-DATA_DIR="/home/guest/Minh/ipf/datasets/MOT17"
+
+# Root of the MOT17 dataset download.
+# The MOT17 zip extracts to <DATA_DIR>/MOT17/train/<sequence>/img1/
+DATA_DIR="${HOME}/Minh/ipf/datasets/MOT17"
+MOT17_TRAIN="${DATA_DIR}/MOT17/train"
+
+# Ensure phase1 package is importable regardless of how the script is invoked.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PHASE1_SRC="$(cd "${SCRIPT_DIR}/../src" && pwd)"
+export PYTHONPATH="${PHASE1_SRC}:${PYTHONPATH:-}"
 
 SEQUENCES=(
     "MOT17-02-DPM"
@@ -55,19 +64,22 @@ FAILED=()
 SUCCEEDED=()
 
 for SEQ in "${SEQUENCES[@]}"; do
-    VIDEO="${DATA_DIR}/${SEQ}.mp4"
     RUN_ID="multi_seq_${SEQ}"
 
     echo "------------------------------------------------------"
     echo "[$(date +%H:%M:%S)] Starting: ${SEQ}"
     echo "------------------------------------------------------"
 
+    # Prefer a pre-converted .mp4; fall back to the raw frame directory.
+    VIDEO="${DATA_DIR}/${SEQ}.mp4"
     if [ ! -f "${VIDEO}" ]; then
-        echo "WARNING: Video not found: ${VIDEO}"
-        echo "  Trying frame directory: ${DATA_DIR}/${SEQ}/img1/"
-        VIDEO="${DATA_DIR}/${SEQ}/img1/"
-        if [ ! -d "${VIDEO}" ]; then
-            echo "ERROR: Neither .mp4 nor frame directory found for ${SEQ}"
+        # Try the standard MOT17 extraction layout: <root>/MOT17/train/<seq>/img1/
+        FRAME_DIR="${MOT17_TRAIN}/${SEQ}/img1"
+        if [ -d "${FRAME_DIR}" ]; then
+            VIDEO="${FRAME_DIR}"
+            echo "  Using frame directory: ${VIDEO}"
+        else
+            echo "ERROR: Neither ${VIDEO} nor ${FRAME_DIR} found for ${SEQ}"
             FAILED+=("${SEQ}")
             continue
         fi
