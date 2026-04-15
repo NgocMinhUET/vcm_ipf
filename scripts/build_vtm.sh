@@ -66,15 +66,18 @@ NPROC=$(nproc 2>/dev/null || echo 4)
 make -j"${NPROC}"
 
 echo "[4/4] Verifying build..."
-ENCODER="${BUILD_DIR}/source/App/EncoderApp/EncoderApp"
-DECODER="${BUILD_DIR}/source/App/DecoderApp/DecoderApp"
+# VTM cmake places binaries in build/bin/umake/<compiler>/<arch>/release/
+# Use find to locate them robustly regardless of gcc version string.
+ENCODER=$(find "${BUILD_DIR}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
+DECODER=$(find "${BUILD_DIR}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
 
-if [ ! -f "${ENCODER}" ]; then
-    echo "ERROR: EncoderApp not found at ${ENCODER}"
+if [ -z "${ENCODER}" ] || [ ! -f "${ENCODER}" ]; then
+    echo "ERROR: EncoderApp not found under ${BUILD_DIR}"
+    echo "Expected location: ${BUILD_DIR}/bin/umake/<gcc-version>/x86_64/release/EncoderApp"
     exit 1
 fi
-if [ ! -f "${DECODER}" ]; then
-    echo "ERROR: DecoderApp not found at ${DECODER}"
+if [ -z "${DECODER}" ] || [ ! -f "${DECODER}" ]; then
+    echo "ERROR: DecoderApp not found under ${BUILD_DIR}"
     exit 1
 fi
 
@@ -89,6 +92,6 @@ echo "Version check:"
 "${ENCODER}" --help 2>&1 | head -5 || true
 echo ""
 echo "To use with IPF Phase 2, set in your config:"
-echo "  vtm_encoder_path: ${ENCODER}"
-echo "  vtm_decoder_path: ${DECODER}"
+echo "  encoder_path: ${ENCODER}"
+echo "  decoder_path: ${DECODER}"
 echo "======================================================"

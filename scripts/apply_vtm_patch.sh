@@ -40,6 +40,7 @@ cd "${VTM_DIR}"
 git checkout source/Lib/EncoderLib/EncCfg.h 2>/dev/null || true
 git checkout source/Lib/EncoderLib/EncSlice.cpp 2>/dev/null || true
 git checkout source/App/EncoderApp/EncAppCfg.cpp 2>/dev/null || true
+git checkout source/App/EncoderApp/EncAppCfg.h 2>/dev/null || true
 rm -f source/Lib/EncoderLib/ExternalQPReader.h
 echo "  Reset complete."
 
@@ -101,51 +102,119 @@ PYEOF
 # ---------------------------------------------------------------------------
 echo "[3/5] Patching EncAppCfg.cpp..."
 ENCAPPCFG="${VTM_DIR}/source/App/EncoderApp/EncAppCfg.cpp"
+ENCAPPCFG_H="${VTM_DIR}/source/App/EncoderApp/EncAppCfg.h"
 
-python3 << PYEOF
-import sys
+export ENCAPPCFG_PATH="${ENCAPPCFG}"
+export ENCAPPCFG_H_PATH="${ENCAPPCFG_H}"
+python3 << 'PYEOF'
+import sys, re, os
 
-path = "${ENCAPPCFG}"
-with open(path, 'r') as f:
+cpp_path = os.environ.get('ENCAPPCFG_PATH', '')
+hdr_path = os.environ.get('ENCAPPCFG_H_PATH', '')
+
+# -----------------------------------------------------------------------
+# (a) EncAppCfg.h — add std::string m_externalQPMapDir member
+# -----------------------------------------------------------------------
+if hdr_path and os.path.isfile(hdr_path):
+    with open(hdr_path, 'r') as f:
+        hdr = f.read()
+    if 'm_externalQPMapDir' not in hdr:
+        # Anchor: the m_bitstreamFileName member is always in EncAppCfg.h
+        anchors_h = ['m_bitstreamFileName', 'm_inputFileName', 'm_reconFileName']
+        anchor_pos = -1
+        for a in anchors_h:
+            anchor_pos = hdr.find(a)
+            if anchor_pos != -1:
+                break
+        if anchor_pos != -1:
+            eol = hdr.find('\n', anchor_pos)
+            hdr = hdr[:eol + 1] + '  std::string  m_externalQPMapDir;  // IPF: per-CTU QP map directory\n' + hdr[eol + 1:]
+            with open(hdr_path, 'w') as f:
+                f.write(hdr)
+            print("  EncAppCfg.h: m_externalQPMapDir member added.")
+        else:
+            print("  WARNING: EncAppCfg.h anchor not found; member not added.")
+    else:
+        print("  EncAppCfg.h: already patched.")
+
+# -----------------------------------------------------------------------
+# (b) EncAppCfg.cpp — register CLI option and wire to EncCfg
+# -----------------------------------------------------------------------
+with open(cpp_path, 'r') as f:
     content = f.read()
 
 if 'ExternalQPMapDir' in content:
-    print("  Already patched, skipping.")
+    print("  EncAppCfg.cpp: already patched, skipping.")
     sys.exit(0)
 
-# --- (a) Register the option ---
-# Find the "BitstreamFile" registration as an anchor (it always exists).
-anchor_opt = '"BitstreamFile"'
-pos = content.find(anchor_opt)
-if pos == -1:
-    print("WARNING: Could not find BitstreamFile anchor in EncAppCfg.cpp", file=sys.stderr)
-    sys.exit(0)
-eol = content.find('\n', pos)
-# Insert on the next line after the BitstreamFile group.
-eol2 = content.find('\n', eol + 1)
-opt_line = '\n  ("ExternalQPMapDir",  m_externalQPMapDir, std::string(""), "Directory with per-CTU QP maps (qp_NNNNNN.txt)")\n'
-content = content[:eol2 + 1] + opt_line + content[eol2 + 1:]
+# --- Register the CLI option ---
+# Try multiple anchors for the option-registration block.
+# VTM-23.4 uses po::Options with ("Name", variable, default, "description") syntax.
+opt_anchors = [
+    '"BitstreamFile"',   # VTM <= 18
+    '"BitstreamFile,b"', # Some versions include shorthand
+    '"InputFile"',
+    '"InputFile,i"',
+    '"ReconFile"',
+    '"ReconFile,o"',
+]
+opt_pos = -1
+for anchor in opt_anchors:
+    opt_pos = content.find(anchor)
+    if opt_pos != -1:
+        print(f"  Found CLI option anchor: {anchor}")
+        break
 
-# --- (b) Wire to EncCfg ---
-# Find the place where other m_xxx members are transferred to the encoder.
-# A reliable anchor is "m_inputFileName" assignment.
-anchor_cfg = 'm_inputFileName'
-pos2 = content.find(anchor_cfg)
-if pos2 != -1:
-    eol3 = content.find('\n', pos2)
-    wire_line = '\n  m_cEncLib.setExternalQPMapDir( m_externalQPMapDir );  // IPF\n'
-    content = content[:eol3 + 1] + wire_line + content[eol3 + 1:]
+if opt_pos == -1:
+    # Last resort: find any ("...", m_inputFileName, ...) line
+    m = re.search(r'\("[\w,]+",\s*m_inputFileName\b', content)
+    if m:
+        opt_pos = m.start()
+        print("  Found CLI option anchor via m_inputFileName regex.")
 
-# --- (c) Add the string member declaration ---
-# Find "string m_bitstreamFileName" as anchor for member variables.
-anchor_mem = 'm_bitstreamFileName'
-pos3 = content.find(anchor_mem)
-if pos3 != -1:
-    eol4 = content.find('\n', pos3)
-    mem_line = '\n  std::string  m_externalQPMapDir;  // IPF external QP map directory\n'
-    content = content[:eol4 + 1] + mem_line + content[eol4 + 1:]
+if opt_pos == -1:
+    print("  WARNING: Could not locate option-registration block in EncAppCfg.cpp.", file=sys.stderr)
+    print("  The --ExternalQPMapDir flag will NOT be available on the command line.", file=sys.stderr)
+    print("  Continuing — QP maps can still be injected via env var in the Python wrapper.", file=sys.stderr)
+else:
+    # Insert new option after the anchor line (skip 1 line to stay in the same block)
+    eol = content.find('\n', opt_pos)
+    eol2 = content.find('\n', eol + 1)
+    opt_line = '\n  ("ExternalQPMapDir",  m_externalQPMapDir, std::string(""), "IPF: directory with per-CTU QP map files (qp_NNNNNN.txt)")\n'
+    content = content[:eol2 + 1] + opt_line + content[eol2 + 1:]
+    print("  CLI option --ExternalQPMapDir registered.")
 
-with open(path, 'w') as f:
+# --- Wire m_externalQPMapDir to EncCfg (setExternalQPMapDir) ---
+# Anchor: look for the xInitLibCfg function or m_inputFileName assignment to EncLib
+wire_anchors = [
+    'm_cEncLib.setInputFileName',
+    'm_cEncLib.setInputFile',
+    'xInitLibCfg',
+]
+wired = False
+for wa in wire_anchors:
+    wp = content.find(wa)
+    if wp != -1:
+        eol_w = content.find('\n', wp)
+        wire_line = '\n  m_cEncLib.setExternalQPMapDir( m_externalQPMapDir );  // IPF\n'
+        content = content[:eol_w + 1] + wire_line + content[eol_w + 1:]
+        print(f"  Wired m_externalQPMapDir to EncCfg via anchor: {wa}")
+        wired = True
+        break
+
+if not wired:
+    # Fallback: find any m_cEncLib.set... call
+    m2 = re.search(r'(m_cEncLib\.set\w+\([^;]+;\n)', content)
+    if m2:
+        insert_at = m2.end()
+        wire_line = '  m_cEncLib.setExternalQPMapDir( m_externalQPMapDir );  // IPF\n'
+        content = content[:insert_at] + wire_line + content[insert_at:]
+        print("  Wired m_externalQPMapDir via fallback m_cEncLib.set pattern.")
+    else:
+        print("  WARNING: Could not wire m_externalQPMapDir to EncCfg.", file=sys.stderr)
+        print("  ExternalQPMapDir option registered but won't be forwarded to encoder.", file=sys.stderr)
+
+with open(cpp_path, 'w') as f:
     f.write(content)
 
 print("  EncAppCfg.cpp patched OK.")
@@ -271,10 +340,15 @@ cd "${BUILD_DIR}"
 NPROC=$(nproc 2>/dev/null || echo 4)
 make -j"${NPROC}"
 
-ENCODER="${BUILD_DIR}/source/App/EncoderApp/EncoderApp"
-if [ ! -f "${ENCODER}" ]; then
+# VTM cmake places binaries in build/bin/umake/<compiler>/<arch>/release/
+# Use find to locate them regardless of gcc version.
+ENCODER=$(find "${BUILD_DIR}" -name "EncoderApp" -type f 2>/dev/null | sort | tail -1)
+DECODER=$(find "${BUILD_DIR}" -name "DecoderApp" -type f 2>/dev/null | sort | tail -1)
+
+if [ -z "${ENCODER}" ] || [ ! -f "${ENCODER}" ]; then
     echo ""
-    echo "BUILD FAILED. Review errors above."
+    echo "BUILD FAILED: EncoderApp binary not found under ${BUILD_DIR}"
+    echo "Check compiler errors above."
     exit 1
 fi
 
@@ -283,6 +357,11 @@ echo "======================================================"
 echo "VTM Patch Applied and Rebuilt Successfully!"
 echo "======================================================"
 echo "Encoder: ${ENCODER}"
+echo "Decoder: ${DECODER}"
+echo ""
+echo "Update your phase2 config (configs/pilot.yaml) vtm section:"
+echo "  encoder_path: ${ENCODER}"
+echo "  decoder_path: ${DECODER}"
 echo ""
 echo "Test with external QP maps:"
 echo "  ${ENCODER} -c <cfg> -i input.yuv -b out.bin -o recon.yuv \\"
@@ -290,5 +369,5 @@ echo "    -wdt 1920 -hgt 1088 -q 32 -f 100 \\"
 echo "    --ExternalQPMapDir=/path/to/qp_maps/"
 echo ""
 echo "Compliance check (decode with UNMODIFIED decoder):"
-echo "  DecoderApp -b out.bin -o decoded.yuv"
+echo "  ${DECODER} -b out.bin -o decoded.yuv"
 echo "======================================================"
