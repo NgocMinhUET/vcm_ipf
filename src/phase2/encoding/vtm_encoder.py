@@ -259,32 +259,56 @@ class VTMEncoder:
         psnr_v = 0.0
 
         # --- Tier 1: SUMMARY block parser ---
-        # Matches lines like:   200 a   1234.5678   35.1234   40.5678   42.1234   36.5678
-        # The frame-type column is a single letter (lower OR upper).
+        #
+        # VTM-23.4 SUMMARY section anatomy (low-delay / all-intra configs differ):
+        #
+        #   SUMMARY --------------------------------------------------------
+        #   Total Frames |   Bitrate     Y-PSNR    U-PSNR    V-PSNR    YUV-PSNR
+        #              5 a    1625.3456   35.1234   40.5678   42.1234   36.5678
+        #
+        #   -OR- (low-delay, where every frame is an I-frame):
+        #
+        #   SUMMARY --------------------------------------------------------
+        #   I Frames    |   Bitrate     Y-PSNR    U-PSNR    V-PSNR    YUV-PSNR
+        #              5 I    1625.3456   35.1234   40.5678   42.1234   36.5678
+        #
+        # The frame-type letter column can be uppercase (I, P, B) or lowercase (a).
+        # YUV-PSNR (last column) may be absent in some older builds — make it optional.
+        #
+        # Strategy: once "SUMMARY" is seen, scan every subsequent non-empty line
+        # for the data pattern.  Never reset — header rows ("I Frames |…",
+        # "Total Frames |…") simply won't match the numeric regex and are skipped.
         summary_data_re = re.compile(
-            r"(\d+)\s+[a-zA-Z]\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)"
+            r"(\d+)\s+[a-zA-Z]\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)"
+            r"(?:\s+([\d.]+))?"  # YUV-PSNR column is optional
         )
 
         lines = log.split("\n")
         in_summary = False
         for line in lines:
-            if "SUMMARY" in line:
+            if "SUMMARY" in line and "---" in line:
                 in_summary = True
                 continue
-            if in_summary and line.strip():
-                m = summary_data_re.search(line)
-                if m:
-                    bitrate = float(m.group(2))
-                    psnr_y = float(m.group(3))
-                    psnr_u = float(m.group(4))
-                    psnr_v = float(m.group(5))
-                    total_bits = int(bitrate * 1000 * n_frames / fps)
-                    logger.debug("Parsed SUMMARY: bitrate=%.3f kbps  PSNR-Y=%.4f dB", bitrate, psnr_y)
-                    break
-                # Stop after the first non-empty line that doesn't match
-                # (header row "Total Frames | …" is non-numeric, skip it)
-                if not re.search(r"Total\s+Frames|Bitrate|---", line):
-                    in_summary = False  # abandoned; reset and keep scanning
+            if not in_summary:
+                continue
+            # New "---" delimiter after SUMMARY means we've left the block.
+            if "---" in line and "SUMMARY" not in line:
+                in_summary = False
+                continue
+            if not line.strip():
+                continue
+            m = summary_data_re.search(line)
+            if m:
+                bitrate = float(m.group(2))
+                psnr_y = float(m.group(3))
+                psnr_u = float(m.group(4))
+                psnr_v = float(m.group(5))
+                total_bits = int(bitrate * 1000 * n_frames / fps)
+                logger.debug(
+                    "Parsed SUMMARY block: bitrate=%.3f kbps  PSNR-Y=%.4f dB",
+                    bitrate, psnr_y,
+                )
+                break  # first matching row is the aggregate ("Total" or "I/P/B Frames")
 
         # --- Tier 2: "Bytes written to file" line ---
         if bitrate == 0.0:
@@ -298,16 +322,20 @@ class VTMEncoder:
                     logger.info("Bitrate from 'Bytes written' line: %.1f kbps", bitrate)
                     break
 
-        # --- Tier 3: loose scan for any PSNR-Y line as last resort ---
+        # --- Tier 3: loose per-frame PSNR scan (last resort for PSNR only) ---
+        # VTM prints per-POC lines like:   POC  0 ... PSNR Y 35.12 ...
         if psnr_y == 0.0:
-            # VTM sometimes prints per-frame PSNR; take the last occurrence
-            psnr_re = re.compile(r"PSNR\s+Y\s*[:=]\s*([\d.]+)", re.IGNORECASE)
-            for line in reversed(lines):
-                m = psnr_re.search(line)
-                if m:
-                    psnr_y = float(m.group(1))
-                    logger.info("PSNR-Y from loose scan: %.4f dB", psnr_y)
-                    break
+            poc_psnr_re = re.compile(
+                r"PSNR\s+Y\s+([\d.]+)", re.IGNORECASE
+            )
+            values = [float(m.group(1)) for line in lines
+                      for m in [poc_psnr_re.search(line)] if m]
+            if values:
+                psnr_y = sum(values) / len(values)  # average over all frames
+                logger.info(
+                    "PSNR-Y from per-frame scan (%d frames): %.4f dB",
+                    len(values), psnr_y,
+                )
 
         return {
             "bitrate_kbps": bitrate,

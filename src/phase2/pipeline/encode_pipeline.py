@@ -314,10 +314,13 @@ class EncodingPipeline:
         lines.append("-" * 100)
 
         for r in summary["results"]:
+            # Prefer independently-computed PSNR (from YUV comparison) over
+            # encoder-log PSNR which may be 0 on some VTM versions.
+            psnr_display = r.get("psnr_y_full") or r.get("psnr_y_enc", 0)
             lines.append(
                 f"{r['run_id']:<35} "
                 f"{r.get('bitrate_kbps', 0):>10.1f} "
-                f"{r.get('psnr_y_enc', 0):>8.2f} "
+                f"{psnr_display:>8.2f} "
                 f"{r.get('psnr_y_roi', 0):>9.2f} "
                 f"{r.get('mAP50', 0):>7.3f} "
                 f"{r.get('total_time_s', 0):>8.1f}"
