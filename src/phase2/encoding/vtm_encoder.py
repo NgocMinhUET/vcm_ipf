@@ -16,6 +16,7 @@ This triple-fallback guarantees a non-zero bitrate for any VTM version.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import subprocess
 import tempfile
@@ -23,6 +24,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 logger = logging.getLogger("phase2.encoding.vtm_encoder")
 
@@ -216,6 +219,16 @@ class VTMEncoder:
                     metrics["bitrate_kbps"] = bitrate_file
                     metrics["total_bits"] = total_bits_file
 
+            # --- PSNR fallback: compute from YUV files if log parsing returned 0 ---
+            # This is always correct regardless of VTM log format / version.
+            if metrics["psnr_y"] == 0.0 and recon_path.exists() and input_path.exists():
+                yuv_psnr = self._psnr_from_yuv(input_path, recon_path, width, height, n_frames)
+                if yuv_psnr > 0.0:
+                    logger.info(
+                        "Log parsing returned PSNR=0; computed from YUV: %.4f dB", yuv_psnr
+                    )
+                    metrics["psnr_y"] = yuv_psnr
+
             return EncodeResult(
                 success=True,
                 bitstream_path=str(bs_path),
@@ -238,6 +251,51 @@ class VTMEncoder:
                 psnr_y=0, psnr_u=0, psnr_v=0,
                 error_msg=f"Encoding timed out after {effective_timeout}s",
             )
+
+    @staticmethod
+    def _psnr_from_yuv(
+        orig_yuv: Path,
+        recon_yuv: Path,
+        width: int,
+        height: int,
+        n_frames: int,
+    ) -> float:
+        """Compute Y-channel PSNR by directly comparing two YUV 4:2:0 files.
+
+        This is used as an infallible Tier-4 fallback when VTM's log output
+        does not contain parseable PSNR values (log format varies across
+        VTM versions and configurations).
+
+        Returns 0.0 on any I/O error; 100.0 if MSE is zero (lossless case).
+        """
+        frame_size_y = width * height
+        frame_size_uv = (width // 2) * (height // 2)
+        frame_bytes = frame_size_y + 2 * frame_size_uv
+
+        mse_sum = 0.0
+        frame_count = 0
+        try:
+            with open(orig_yuv, "rb") as fo, open(recon_yuv, "rb") as fr:
+                for _ in range(n_frames):
+                    orig_raw = fo.read(frame_bytes)
+                    recon_raw = fr.read(frame_bytes)
+                    if len(orig_raw) < frame_bytes or len(recon_raw) < frame_bytes:
+                        break
+                    # Y-channel only (first frame_size_y bytes of each frame)
+                    orig_y = np.frombuffer(orig_raw[:frame_size_y], dtype=np.uint8).astype(np.float32)
+                    recon_y = np.frombuffer(recon_raw[:frame_size_y], dtype=np.uint8).astype(np.float32)
+                    mse_sum += float(np.mean((orig_y - recon_y) ** 2))
+                    frame_count += 1
+        except Exception as exc:
+            logger.warning("YUV PSNR computation failed: %s", exc)
+            return 0.0
+
+        if frame_count == 0:
+            return 0.0
+        avg_mse = mse_sum / frame_count
+        if avg_mse < 1e-10:
+            return 100.0
+        return 10.0 * math.log10(255.0 ** 2 / avg_mse)
 
     def _parse_encoder_log(self, log: str, n_frames: int, fps: int) -> dict:
         """Parse VTM encoder summary log for bitrate and PSNR.
@@ -336,6 +394,26 @@ class VTMEncoder:
                     "PSNR-Y from per-frame scan (%d frames): %.4f dB",
                     len(values), psnr_y,
                 )
+
+        # Emit debug dump of the SUMMARY section whenever parsing yields zeros,
+        # so the actual VTM-23.4 log format can be diagnosed from log files.
+        if psnr_y == 0.0:
+            summary_lines = []
+            capture = False
+            for line in lines:
+                if "SUMMARY" in line:
+                    capture = True
+                if capture:
+                    summary_lines.append(line)
+                    if len(summary_lines) > 15:
+                        break
+            if summary_lines:
+                logger.debug(
+                    "SUMMARY block (for format diagnosis):\n%s",
+                    "\n".join(summary_lines),
+                )
+            else:
+                logger.debug("No SUMMARY block found in encoder log (log length: %d chars)", len(log))
 
         return {
             "bitrate_kbps": bitrate,
