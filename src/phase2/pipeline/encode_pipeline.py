@@ -148,6 +148,7 @@ class EncodingPipeline:
             fps=seq_cfg.fps,
             external_qp_dir=qp_map_dir,
             log_path=str(enc_log),
+            timeout_s=self.cfg.vtm.timeout_s,
         )
         result.encode = asdict(enc_result)
 
@@ -210,10 +211,18 @@ class EncodingPipeline:
             result.task = asdict(task_result)
 
         result.total_time_s = time.time() - t_start
+
+        # Prefer PSNR from independent YUV comparison (Step 4); fall back to
+        # encoder-log value (may be 0 for some VTM versions).
+        psnr_display = (
+            result.psnr.get("psnr_y_full_mean", 0.0)
+            if result.psnr
+            else enc_result.psnr_y
+        )
         logger.info(
             "  Done: bitrate=%.1f kbps, PSNR_Y=%.2f dB, time=%.1fs",
             enc_result.bitrate_kbps,
-            enc_result.psnr_y,
+            psnr_display,
             result.total_time_s,
         )
 

@@ -31,6 +31,12 @@ class VTMConfig(BaseModel):
     )
     internal_bit_depth: int = Field(8, description="Internal bit depth (8 or 10)")
     threads: int = Field(1, description="VTM parallel threads (1 = deterministic)")
+    timeout_s: Optional[int] = Field(
+        None,
+        description=(
+            "Per-run encoding timeout in seconds.  None = auto (max(3600, n_frames×90))."
+        ),
+    )
 
 
 class SequenceConfig(BaseModel):

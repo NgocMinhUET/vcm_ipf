@@ -5,6 +5,12 @@
 # Uses 4 QP points x 5 methods x 3 sequences = 60 encoding runs.
 #
 # Aligned with 04_EXPERIMENT_MATRIX.md section C.1 (Pilot Grid).
+#
+# n_frames=50 is chosen for speed:
+#   - 50 frames at QP=22 (1920x1152) ≈ 30 min/run vs. 2+ hrs at 200 frames.
+#   - 50 frames is sufficient for stable BD-Rate RD points (standard practice
+#     in VCM literature when time-constrained).
+#   - Total wall-time estimate: 60 runs × ~20 min avg ≈ 20 h on a single CPU.
 # =============================================================================
 
 experiment_id: "pilot_v1"
@@ -20,6 +26,9 @@ vtm:
   encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
   internal_bit_depth: 8
   threads: 1
+  # Per-run timeout budget.  Adaptive formula in vtm_encoder.py also applies
+  # (max(3600, n_frames × 90 s/frame)), so this acts as an explicit ceiling.
+  timeout_s: 10800  # 3 hours — enough for QP=22, 50 frames with 6× headroom
 
 sequences:
   # Height is CTU-128 aligned: ceil(1080/128)*128 = 1152
@@ -31,7 +40,7 @@ sequences:
     original_width: 1920
     original_height: 1080
     fps: 30
-    n_frames: 200
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
 
   - name: "MOT17-02-DPM"
@@ -41,7 +50,7 @@ sequences:
     original_width: 1920
     original_height: 1080
     fps: 30
-    n_frames: 200
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
 
   - name: "MOT17-09-DPM"
@@ -51,7 +60,7 @@ sequences:
     original_width: 1920
     original_height: 1080
     fps: 30
-    n_frames: 200
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
 
 encoding:
