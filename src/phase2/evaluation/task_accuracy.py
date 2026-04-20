@@ -70,10 +70,14 @@ class TaskEvaluator:
         frames_dir: str,
         n_frames: int = 0,
     ) -> List[DetectionResult]:
-        """Run detection on a directory of PNG frames.
+        """Run detection on a directory of image frames.
+
+        Supports PNG, JPG, JPEG (case-insensitive).  MOT17 ships frames
+        as .jpg, while decoded outputs from save_frames_from_yuv are .png —
+        both must be handled.
 
         Args:
-            frames_dir: Directory with frames named NNNNNN.png.
+            frames_dir: Directory with frames (any common image extension).
             n_frames: Max frames to process (0 = all).
 
         Returns:
@@ -82,7 +86,23 @@ class TaskEvaluator:
         self._load_model()
         fdir = Path(frames_dir).expanduser()
 
-        frame_files = sorted(fdir.glob("*.png"))
+        # Collect every common image extension and de-duplicate (case-insensitive).
+        patterns = ("*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG")
+        seen = set()
+        frame_files = []
+        for pat in patterns:
+            for p in fdir.glob(pat):
+                if p.name.lower() not in seen:
+                    seen.add(p.name.lower())
+                    frame_files.append(p)
+        frame_files.sort(key=lambda p: p.name)
+
+        if not frame_files:
+            logger.warning(
+                "detect_on_frames: no image files found in %s "
+                "(searched %s)", fdir, ", ".join(patterns),
+            )
+
         if n_frames > 0:
             frame_files = frame_files[:n_frames]
 
