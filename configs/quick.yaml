@@ -1,0 +1,54 @@
+# =============================================================================
+# Phase 2 QUICK Configuration — representative test before full pilot (~30–60 min)
+# =============================================================================
+# Purpose:  After smoke passes, run a slightly larger grid that exercises:
+#             - all 5 methods (M0, M1, M4, M5, M6)
+#             - both ends of the QP curve (27, 37)
+#             - enough frames to get statistically meaningful PSNR/mAP
+#           on a single sequence.  Confirms BD-Rate computation works
+#           BEFORE committing to a 30+ hour pilot run.
+#
+# Grid:  1 sequence × 5 methods × 2 QPs × 10 frames = 10 runs
+# Estimated wall-clock:
+#   - QP=27 ~50s/frame  → 500s/run × 5 methods = 2500s
+#   - QP=37 ~30s/frame  → 300s/run × 5 methods = 1500s
+#   - Total ≈ 4000s ≈ 67 min
+# =============================================================================
+
+experiment_id: "quick_v1"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 3600  # 1 hour per run is plenty for 10 frames
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 10
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+encoding:
+  qp_points: [27, 37]
+  methods: ["M0", "M1", "M4", "M5", "M6"]
+  phase1_output_dir: "~/ipf_outputs"
+  phase1_run_prefix: "multi_seq_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1

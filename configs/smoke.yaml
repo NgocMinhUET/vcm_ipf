@@ -1,0 +1,56 @@
+# =============================================================================
+# Phase 2 SMOKE Configuration — fastest sanity check (~5–10 min total)
+# =============================================================================
+# Purpose:  Verify that the encode → decode → PSNR → mAP pipeline works
+#           end-to-end after any code change.  NOT for scientific results.
+#
+# What you should see in the resulting experiment_summary.json:
+#   1. M0 and M4 produce DIFFERENT bitrates / PSNRs
+#      (if they're equal → BUG #1 still active)
+#   2. psnr_y_full != psnr_y_roi
+#      (if equal → BUG #2 still active)
+#   3. mAP50 > 0 for at least M0
+#      (if 0 → BUG #3 still active)
+#
+# Grid:  1 sequence × 2 methods × 2 QPs × 5 frames = 4 runs
+# =============================================================================
+
+experiment_id: "smoke_v1"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 1800  # 30 min per run is more than enough for 5 frames
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 5
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+encoding:
+  # Two QPs at the extremes are enough to verify the pipeline.
+  qp_points: [27, 37]
+  # M0 = uniform anchor; M4 = our IPF v2.  If these differ, the patch works.
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/ipf_outputs"
+  phase1_run_prefix: "multi_seq_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
