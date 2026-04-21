@@ -20,8 +20,8 @@ output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 
 vtm:
-  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
-  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
   encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
   internal_bit_depth: 8
   threads: 1

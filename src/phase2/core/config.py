@@ -16,13 +16,13 @@ from pydantic import BaseModel, Field
 class VTMConfig(BaseModel):
     """VTM encoder/decoder paths and settings."""
     encoder_path: str = Field(
-        # VTM cmake outputs binaries to VTM_DIR/bin/umake/<gcc>/<arch>/release/
-        # (NOT under build/ — the output is relative to the VTM source root)
-        "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp",
-        description="Path to patched VTM EncoderApp",
+        # Patched static binary built with ExternalQPMapDir support.
+        # Located at bin/EncoderAppStatic (static build, NOT the cmake umake output).
+        "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic",
+        description="Path to patched VTM EncoderApp (must support --ExternalQPMapDir)",
     )
     decoder_path: str = Field(
-        "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp",
+        "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic",
         description="Path to VTM DecoderApp",
     )
     encoder_cfg: str = Field(

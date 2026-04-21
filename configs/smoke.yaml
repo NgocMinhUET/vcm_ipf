@@ -15,13 +15,13 @@
 # Grid:  1 sequence × 2 methods × 2 QPs × 5 frames = 4 runs
 # =============================================================================
 
-experiment_id: "smoke_v1"
+experiment_id: "smoke_v2"
 output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 
 vtm:
-  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/EncoderApp"
-  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/umake/gcc-11.4/x86_64/release/DecoderApp"
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
   encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
   internal_bit_depth: 8
   threads: 1
