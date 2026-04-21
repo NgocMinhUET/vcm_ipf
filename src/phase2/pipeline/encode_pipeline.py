@@ -422,3 +422,33 @@ class EncodingPipeline:
 
         path = self.output_dir / "experiment_table.txt"
         path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    """CLI entry point: python -m phase2.pipeline.encode_pipeline --config <yaml>"""
+    import argparse
+    import sys
+
+    from phase2.core.config import load_phase2_config
+
+    parser = argparse.ArgumentParser(description="Phase 2 VTM encoding pipeline")
+    parser.add_argument("--config", required=True, help="Path to phase2 YAML config")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    cfg = load_phase2_config(args.config)
+    pipeline = EncodingPipeline(cfg)
+    results = pipeline.run_all()
+
+    n_ok = sum(1 for r in results if r.encode and r.encode.get("success"))
+    print(f"\n{cfg.experiment_id} complete: {n_ok}/{len(results)} successful runs")
+    print(f"Results: {pipeline.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
