@@ -9,11 +9,16 @@
 #
 # Grid:  1 sequence × 5 methods × 4 QPs × 10 frames = 20 runs
 # Estimated wall-clock (with lambda-aware QP map encoding):
-#   - QP=22 ~50s/frame  → 500s/run × 5 methods = 2500s  ≈ 42 min
 #   - QP=27 ~35s/frame  → 350s/run × 5 methods = 1750s  ≈ 29 min
-#   - QP=32 ~25s/frame  → 250s/run × 5 methods = 1250s  ≈ 21 min
+#   - QP=32 ~20s/frame  → 200s/run × 5 methods = 1000s  ≈ 17 min
 #   - QP=37 ~15s/frame  → 150s/run × 5 methods =  750s  ≈ 12 min
-#   - Total ≈ 6250s ≈ 104 min ≈ 1.7 h
+#   - QP=42  ~8s/frame  →  80s/run × 5 methods =  400s  ≈  7 min
+#   - Total ≈ 3900s ≈ 65 min
+#
+# QP range [27,32,37,42] is chosen deliberately:
+#   QP=27-32: map values (22-38) are mostly > base → background saves bits → M4 < M0 bitrate
+#   QP=37-42: map ROI (22) >> base → strong ROI protection visible, mAP should improve
+#   QP=22 is excluded: very slow (50s/frame) and adds little beyond QP=27
 # =============================================================================
 
 experiment_id: "quick_v2"
@@ -40,7 +45,7 @@ sequences:
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
 
 encoding:
-  qp_points: [22, 27, 32, 37]
+  qp_points: [27, 32, 37, 42]
   methods: ["M0", "M1", "M4", "M5", "M6"]
   phase1_output_dir: "~/Minh/ipf/phase1_outputs"
   phase1_run_prefix: "multi_seq_"

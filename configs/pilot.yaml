@@ -64,7 +64,7 @@ sequences:
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
 
 encoding:
-  qp_points: [22, 27, 32, 37]
+  qp_points: [27, 32, 37, 42]
   methods: ["M0", "M1", "M4", "M5", "M6"]
   phase1_output_dir: "~/Minh/ipf/phase1_outputs"
   phase1_run_prefix: "multi_seq_"
