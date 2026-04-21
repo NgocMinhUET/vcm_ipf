@@ -117,10 +117,11 @@ if [ ${#FAILED[@]} -gt 0 ]; then
     done
 fi
 echo ""
-echo "Results at: ~/ipf_outputs/multi_seq_*/"
+echo "Results at: ~/Minh/ipf/phase1_outputs/multi_seq_*/"
 echo ""
 echo "Next step: run cross-sequence analysis"
-echo "  python -m phase1.analysis.cross_sequence_stats \\"
-echo "    --output-dir ~/ipf_outputs \\"
+echo "  cd ~/Minh/ipf/phase1"
+echo "  PYTHONPATH=src python -m phase1.analysis.cross_sequence_stats \\"
+echo "    --output-dir ~/Minh/ipf/phase1_outputs \\"
 echo "    --run-prefix multi_seq_"
 echo "======================================================"

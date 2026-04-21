@@ -10,7 +10,7 @@
 
 run_id: "run_001"
 video_path: ""
-output_dir: "~/ipf_outputs"
+output_dir: "~/Minh/ipf/phase1_outputs"
 max_frames: null
 log_level: "INFO"
 
