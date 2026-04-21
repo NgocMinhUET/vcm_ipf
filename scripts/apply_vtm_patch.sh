@@ -253,11 +253,15 @@ for i, ln in enumerate(lines):
         last_inc = i
 lines.insert(last_inc + 1, '#include "ExternalQPReader.h"  // IPF: external per-CTU QP maps')
 lines.insert(last_inc + 2, '#include <cstdlib>               // IPF: std::getenv')
-lines.insert(last_inc + 3, '')
-lines.insert(last_inc + 4, '// IPF: singleton QP map reader (initialised once per encode session)')
-lines.insert(last_inc + 5, 'static ExternalQPReader g_ipfQPReader;')
-lines.insert(last_inc + 6, 'static bool             g_ipfQPReaderInit = false;')
-lines.insert(last_inc + 7, '')
+lines.insert(last_inc + 3, '#include <cmath>                 // IPF: std::pow for lambda')
+lines.insert(last_inc + 4, '')
+lines.insert(last_inc + 5, '// IPF: singleton QP map reader (initialised once per encode session)')
+lines.insert(last_inc + 6, 'static ExternalQPReader g_ipfQPReader;')
+lines.insert(last_inc + 7, 'static bool             g_ipfQPReaderInit = false;')
+lines.insert(last_inc + 8, '// IPF: per-slice save/restore state for the restore-before-next pattern')
+lines.insert(last_inc + 9, 'static int              g_ipfPrevQP  = -1;   // -1 = no pending restore')
+lines.insert(last_inc + 10, 'static double           g_ipfPrevLam = -1.0;')
+lines.insert(last_inc + 11, '')
 content = '\n'.join(lines)
 
 # -------------------------------------------------------------------------
@@ -288,41 +292,62 @@ init_code = """
     }
     g_ipfQPReaderInit = true;
   }
+  // Reset per-slice save/restore state at the start of every new slice.
+  // setUpLambda() will set the correct base QP+lambda immediately after,
+  // so any stale values from the previous slice are harmless here.
+  g_ipfPrevQP  = -1;
+  g_ipfPrevLam = -1.0;
   // === End IPF init ===
 """
 content = content[:open_brace + 1] + init_code + content[open_brace + 1:]
 
 # -------------------------------------------------------------------------
-# (c) Per-CTU QP override injected before EVERY compressCtu() call.
+# (c) Per-CTU QP + lambda override using "restore-before-next" pattern.
 #
-# KEY FIX: In VTM-23.4 compressCtu is called from encodeCtus(), not from
-# compressSlice() directly.  The local variable names in encodeCtus() differ
-# from those in compressSlice(), so we MUST NOT reference actualQP or
-# CHANNEL_TYPE_LUMA (which may not exist in that scope).
+# WHY LAMBDA MATTERS: setSliceQp() alone changes the quantisation level but
+# NOT the lambda (rate-distortion multiplier).  Lambda is set once per slice
+# by setUpLambda() and controls all coding decisions (partition, mode, etc.).
+# Without updating the lambda, M4 encoding decisions are identical to M0 —
+# only the bitstream QP signalling changes, producing ~0% bitrate difference.
 #
-# Safe variables always in scope inside the CTU loop of any EncSlice function:
-#   ctuRsAddr              - uint32_t  (loop variable)
-#   cs.pcv->widthInCtus    - uint32_t  (available via CodingStructure)
-#   cs.slice->getPOC()     - int       (always available)
-#   cs.slice->getSliceQp() - int       (base slice QP, always available)
-#   cs.slice->setSliceQp() - void      (setter, always available)
+# FIX: Before each CTU we restore the previous CTU's saved QP+lambda (so VTM
+# post-CTU processing always sees the correct base values), then immediately
+# set the external QP+lambda for the current CTU.  The restore-before-next
+# approach avoids needing a second injection point after compressCtu().
 #
-# The override works by temporarily setting the slice QP to the external value
-# before each CTU is encoded.  VTM's CTU encoder reads the slice QP from the
-# slice object at encoding time, so this is the correct hook point.
+# Lambda formula: lambda = 0.57 * 2^((QP-12)/3)  (VTM simplified formula)
+# This is consistent with VTM's own calculation and ensures proper RD.
+#
+# m_pcRdCost is a member of EncSlice (declared in EncSlice.h) so it is
+# always accessible from the CTU loop regardless of which EncSlice function
+# calls compressCtu().
 # -------------------------------------------------------------------------
 ctu_qp_override = (
-    '  // === IPF: per-CTU QP override from external map ===\n'
+    '  // === IPF: per-CTU QP+lambda override (restore-before-next) ===\n'
+    '  if (g_ipfPrevQP >= 0)\n'
+    '  {\n'
+    '    cs.slice->setSliceQp(g_ipfPrevQP);\n'
+    '    m_pcRdCost->setLambda(g_ipfPrevLam, cs.slice->getBitDepths());\n'
+    '    g_ipfPrevQP = -1;\n'
+    '  }\n'
     '  if (g_ipfQPReader.isEnabled())\n'
     '  {\n'
     '    const int _ctuRow = (int)(ctuRsAddr / cs.pcv->widthInCtus);\n'
     '    const int _ctuCol = (int)(ctuRsAddr % cs.pcv->widthInCtus);\n'
-    '    const int _baseQP = cs.slice->getSliceQp();\n'
+    '    const int _curQP  = cs.slice->getSliceQp();\n'
     '    const int _extQP  = g_ipfQPReader.getQP(\n'
-    '      (int)cs.slice->getPOC(), _ctuRow, _ctuCol, _baseQP);\n'
-    '    cs.slice->setSliceQp(_extQP);\n'
+    '      (int)cs.slice->getPOC(), _ctuRow, _ctuCol, _curQP);\n'
+    '    if (_extQP != _curQP)\n'
+    '    {\n'
+    '      g_ipfPrevQP  = _curQP;\n'
+    '      g_ipfPrevLam = m_pcRdCost->getLambda();\n'
+    '      cs.slice->setSliceQp(_extQP);\n'
+    '      m_pcRdCost->setLambda(\n'
+    '        0.57 * std::pow(2.0, (_extQP - 12.0) / 3.0),\n'
+    '        cs.slice->getBitDepths());\n'
+    '    }\n'
     '  }\n'
-    '  // === End IPF CTU QP override ===\n'
+    '  // === End IPF CTU QP+lambda override ===\n'
 )
 
 # Inject before EVERY call to compressCtu() in the file (covers both
