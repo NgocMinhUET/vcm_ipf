@@ -7,7 +7,7 @@ This ensures type validation, default values, and easy serialization.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -23,7 +23,7 @@ class DetectorConfig(BaseModel):
     iou_threshold: float = Field(0.45, ge=0.0, le=1.0)
     device: str = Field("cuda:0", description="'cuda:0', 'cpu', or 'auto'")
     img_size: int = Field(640, description="Inference resolution")
-    classes: Optional[list[int]] = Field(
+    classes: Optional[List[int]] = Field(
         None, description="COCO class IDs to keep; None = all"
     )
 
@@ -57,7 +57,7 @@ class MassConfig(BaseModel):
     use_class_priority: bool = True
     use_track_age: bool = True
     age_warmup_frames: int = Field(5, ge=1)
-    class_priorities: dict[str, float] = Field(
+    class_priorities: Dict[str, float] = Field(
         default_factory=lambda: {
             "person": 1.0,
             "car": 1.0,
@@ -129,7 +129,7 @@ class AblationConfig(BaseModel):
         M3: IPF spatial field only (no EMA, no bounded dynamics)
     """
     enabled: bool = Field(False, description="Include ablation variants in comparison")
-    variants: list[str] = Field(
+    variants: List[str] = Field(
         default_factory=lambda: ["A1", "A3", "A4", "A6", "M2", "M3"],
         description="Ablation variant IDs to include when enabled",
     )
@@ -188,7 +188,7 @@ class IPFConfig(BaseModel):
     log_level: str = Field("INFO", description="Logging level")
 
 
-def load_config(path: str | Path) -> IPFConfig:
+def load_config(path: Union[str, Path]) -> IPFConfig:
     """Load IPFConfig from a YAML file, falling back to defaults for missing keys."""
     path = Path(path)
     if not path.exists():
@@ -198,7 +198,7 @@ def load_config(path: str | Path) -> IPFConfig:
     return IPFConfig(**raw)
 
 
-def save_config(cfg: IPFConfig, path: str | Path) -> None:
+def save_config(cfg: IPFConfig, path: Union[str, Path]) -> None:
     """Serialize config to YAML for reproducibility."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

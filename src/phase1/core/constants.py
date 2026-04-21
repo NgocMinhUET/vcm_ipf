@@ -1,5 +1,7 @@
 """Global constants for the IPF pipeline."""
 
+from __future__ import annotations
+
 COCO_CLASS_NAMES: dict[int, str] = {
     0: "person",
     1: "bicycle",
