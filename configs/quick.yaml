@@ -1,21 +1,22 @@
 # =============================================================================
-# Phase 2 QUICK Configuration — representative test before full pilot (~30–60 min)
+# Phase 2 QUICK Configuration — representative test before full pilot (~2 h)
 # =============================================================================
-# Purpose:  After smoke passes, run a slightly larger grid that exercises:
+# Purpose:  After smoke passes, run a grid that gives a REAL BD-Rate curve:
 #             - all 5 methods (M0, M1, M4, M5, M6)
-#             - both ends of the QP curve (27, 37)
-#             - enough frames to get statistically meaningful PSNR/mAP
-#           on a single sequence.  Confirms BD-Rate computation works
-#           BEFORE committing to a 30+ hour pilot run.
+#             - 4 QP points spanning the full curve (22, 27, 32, 37)
+#             - 10 frames — enough for stable mAP trends without taking all day
+#           Confirms BD-Rate computation works BEFORE committing to a 30+ h pilot.
 #
-# Grid:  1 sequence × 5 methods × 2 QPs × 10 frames = 10 runs
-# Estimated wall-clock:
-#   - QP=27 ~50s/frame  → 500s/run × 5 methods = 2500s
-#   - QP=37 ~30s/frame  → 300s/run × 5 methods = 1500s
-#   - Total ≈ 4000s ≈ 67 min
+# Grid:  1 sequence × 5 methods × 4 QPs × 10 frames = 20 runs
+# Estimated wall-clock (with lambda-aware QP map encoding):
+#   - QP=22 ~50s/frame  → 500s/run × 5 methods = 2500s  ≈ 42 min
+#   - QP=27 ~35s/frame  → 350s/run × 5 methods = 1750s  ≈ 29 min
+#   - QP=32 ~25s/frame  → 250s/run × 5 methods = 1250s  ≈ 21 min
+#   - QP=37 ~15s/frame  → 150s/run × 5 methods =  750s  ≈ 12 min
+#   - Total ≈ 6250s ≈ 104 min ≈ 1.7 h
 # =============================================================================
 
-experiment_id: "quick_v1"
+experiment_id: "quick_v2"
 output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 
@@ -39,7 +40,7 @@ sequences:
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
 
 encoding:
-  qp_points: [27, 37]
+  qp_points: [22, 27, 32, 37]
   methods: ["M0", "M1", "M4", "M5", "M6"]
   phase1_output_dir: "~/Minh/ipf/phase1_outputs"
   phase1_run_prefix: "multi_seq_"
