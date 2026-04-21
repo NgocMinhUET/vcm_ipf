@@ -15,7 +15,7 @@
 # Grid:  1 sequence × 2 methods × 2 QPs × 5 frames = 4 runs
 # =============================================================================
 
-experiment_id: "smoke_v2"
+experiment_id: "smoke_v3"
 output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 

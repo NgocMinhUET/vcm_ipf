@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import subprocess
 import tempfile
@@ -154,9 +155,17 @@ class VTMEncoder:
             f"--InternalBitDepth={self.internal_bit_depth}",
         ]
 
+        # Build subprocess environment: set VTM_EXTERNAL_QP_DIR so the patched
+        # EncSlice.cpp can find the QP map directory via std::getenv() even if
+        # the EncAppCfg → EncCfg wiring anchor was not matched at patch time.
+        env = os.environ.copy()
         if external_qp_dir:
             qp_dir = Path(external_qp_dir).expanduser()
             cmd.append(f"--ExternalQPMapDir={qp_dir}")
+            env["VTM_EXTERNAL_QP_DIR"] = str(qp_dir)
+            logger.info("External QP maps: %s", qp_dir)
+        else:
+            env.pop("VTM_EXTERNAL_QP_DIR", None)
 
         # Adaptive timeout: 90 s/frame budget (min 3600 s).
         # QP=22 at 1920x1152 takes ~36 s/frame on a modern CPU, so 90 s gives
@@ -167,7 +176,7 @@ class VTMEncoder:
             "VTM encode: QP=%d, %dx%d, %d frames, timeout=%ds",
             qp, width, height, n_frames, effective_timeout,
         )
-        logger.debug("Command: %s", " ".join(cmd))
+        logger.info("CMD: %s", " ".join(cmd))
 
         t_start = time.time()
 
@@ -177,6 +186,7 @@ class VTMEncoder:
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
+                env=env,
             )
             encoding_time = time.time() - t_start
 
@@ -185,7 +195,14 @@ class VTMEncoder:
             if log_path:
                 lp = Path(log_path).expanduser()
                 lp.parent.mkdir(parents=True, exist_ok=True)
-                lp.write_text(full_log, encoding="utf-8")
+                # Prepend the exact command and env var so we can always verify
+                # what was passed to the encoder (visible in encoder.log).
+                header = "CMD: " + " ".join(cmd) + "\n"
+                qp_env = env.get("VTM_EXTERNAL_QP_DIR", "")
+                if qp_env:
+                    header += f"ENV[VTM_EXTERNAL_QP_DIR]={qp_env}\n"
+                header += "\n"
+                lp.write_text(header + full_log, encoding="utf-8")
 
             if result.returncode != 0:
                 logger.error("VTM encoder failed (exit code %d)", result.returncode)

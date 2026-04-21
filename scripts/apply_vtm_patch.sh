@@ -252,11 +252,12 @@ for i, ln in enumerate(lines):
     if ln.strip().startswith('#include'):
         last_inc = i
 lines.insert(last_inc + 1, '#include "ExternalQPReader.h"  // IPF: external per-CTU QP maps')
-lines.insert(last_inc + 2, '')
-lines.insert(last_inc + 3, '// IPF: singleton QP map reader (initialised once per encode session)')
-lines.insert(last_inc + 4, 'static ExternalQPReader g_ipfQPReader;')
-lines.insert(last_inc + 5, 'static bool             g_ipfQPReaderInit = false;')
-lines.insert(last_inc + 6, '')
+lines.insert(last_inc + 2, '#include <cstdlib>               // IPF: std::getenv')
+lines.insert(last_inc + 3, '')
+lines.insert(last_inc + 4, '// IPF: singleton QP map reader (initialised once per encode session)')
+lines.insert(last_inc + 5, 'static ExternalQPReader g_ipfQPReader;')
+lines.insert(last_inc + 6, 'static bool             g_ipfQPReaderInit = false;')
+lines.insert(last_inc + 7, '')
 content = '\n'.join(lines)
 
 # -------------------------------------------------------------------------
@@ -269,10 +270,22 @@ if pos == -1:
     sys.exit(1)
 open_brace = content.find('{', pos)
 init_code = """
-  // === IPF: initialise external QP reader once ===
-  if (!g_ipfQPReaderInit && !m_pcCfg->getExternalQPMapDir().empty())
+  // === IPF: initialise external QP reader once per process ===
+  if (!g_ipfQPReaderInit)
   {
-    g_ipfQPReader.setDir(m_pcCfg->getExternalQPMapDir());
+    // Primary: CLI option wired through EncCfg (requires anchor match in EncAppCfg.cpp).
+    std::string _ipfDir = m_pcCfg->getExternalQPMapDir();
+    // Reliable fallback: environment variable set by the Python pipeline.
+    if (_ipfDir.empty())
+    {
+      const char* _envDir = std::getenv("VTM_EXTERNAL_QP_DIR");
+      if (_envDir && _envDir[0] != '\\0') { _ipfDir = std::string(_envDir); }
+    }
+    if (!_ipfDir.empty())
+    {
+      g_ipfQPReader.setDir(_ipfDir);
+      std::cout << "[IPF] ExternalQPReader enabled, reading from: " << _ipfDir << std::endl;
+    }
     g_ipfQPReaderInit = true;
   }
   // === End IPF init ===
