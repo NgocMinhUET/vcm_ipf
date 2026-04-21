@@ -41,7 +41,7 @@ sequences:
 encoding:
   qp_points: [27, 37]
   methods: ["M0", "M1", "M4", "M5", "M6"]
-  phase1_output_dir: "~/ipf_outputs"
+  phase1_output_dir: "~/Minh/ipf/phase1_outputs"
   phase1_run_prefix: "multi_seq_"
 
 evaluation:

@@ -63,7 +63,7 @@ class EncodingConfig(BaseModel):
         description="Methods to encode (must have QP maps from Phase 1)",
     )
     phase1_output_dir: str = Field(
-        "~/ipf_outputs",
+        "~/Minh/ipf/phase1_outputs",
         description="Phase 1 output directory containing QP maps",
     )
     phase1_run_prefix: str = Field(

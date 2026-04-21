@@ -43,7 +43,7 @@ encoding:
   qp_points: [27, 37]
   # M0 = uniform anchor; M4 = our IPF v2.  If these differ, the patch works.
   methods: ["M0", "M4"]
-  phase1_output_dir: "~/ipf_outputs"
+  phase1_output_dir: "~/Minh/ipf/phase1_outputs"
   phase1_run_prefix: "multi_seq_"
 
 evaluation:
