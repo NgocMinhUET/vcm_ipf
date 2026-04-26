@@ -325,24 +325,34 @@ class EncodingPipeline:
         """Locate Phase 1 QP maps for a given sequence and method.
 
         For M0 (uniform QP), no external QP maps are needed.
-        For other methods, find the qp_vtm/ directory from Phase 1 outputs.
+
+        Search order (Phase 3 preferred → legacy):
+            1. ``<run_dir>/qp_vtm_delta/`` — Q_base-agnostic DELTA maps
+               (composed with Q_base by VTMEncoder at encode time).
+            2. ``<run_dir>/qp_vtm/`` — legacy ABSOLUTE maps (pilot v1).
+
+        The encoder wrapper auto-detects the format from the file header
+        and composes deltas with Q_base on-the-fly.
         """
         if method == "M0":
             return None
 
         phase1_dir = Path(self.cfg.encoding.phase1_output_dir).expanduser()
         prefix = self.cfg.encoding.phase1_run_prefix
+        base = phase1_dir / f"{prefix}{seq_name}" / method
 
-        run_dir = phase1_dir / f"{prefix}{seq_name}" / method / "qp_vtm"
-        if run_dir.exists():
-            return str(run_dir)
+        # Phase 3: delta maps take precedence when present.
+        delta_dir = base / "qp_vtm_delta"
+        if delta_dir.is_dir() and any(delta_dir.glob("qp_*.txt")):
+            return str(delta_dir)
 
-        run_dir_alt = phase1_dir / f"{prefix}{seq_name}" / method / "qp_vtm"
-        if run_dir_alt.exists():
-            return str(run_dir_alt)
+        # Legacy: absolute-QP maps.
+        abs_dir = base / "qp_vtm"
+        if abs_dir.is_dir() and any(abs_dir.glob("qp_*.txt")):
+            return str(abs_dir)
 
         logger.warning(
-            "QP maps not found for %s/%s at %s", seq_name, method, run_dir
+            "QP maps not found for %s/%s under %s", seq_name, method, base
         )
         return None
 

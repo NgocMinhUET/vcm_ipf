@@ -19,16 +19,28 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
 logger = logging.getLogger("phase2.encoding.vtm_encoder")
+
+
+# QP-map format tags (mirrored from phase1/src/phase1/export/qp_exporter.py).
+_HEADER_TAG_ABSOLUTE = "type=absolute"
+_HEADER_TAG_DELTA = "type=delta"
+
+# VVC QP range used for clamping Q_base + delta. VVC 4:2:0 8-bit supports
+# [-12, 63] internally, but the external QP-map patch only emits valid
+# slice QPs. We stay within the conservative [1, 51] range.
+_VVC_QP_MIN = 1
+_VVC_QP_MAX = 51
 
 
 @dataclass
@@ -159,11 +171,21 @@ class VTMEncoder:
         # EncSlice.cpp can find the QP map directory via std::getenv() even if
         # the EncAppCfg → EncCfg wiring anchor was not matched at patch time.
         env = os.environ.copy()
+
+        # Phase 3: if the external_qp_dir contains DELTA-QP maps (Q_base-agnostic)
+        # we materialize an absolute-QP directory on-the-fly by composing with
+        # the run-time `qp`. For legacy ABSOLUTE maps we pass through unchanged.
+        _materialized_tmpdir: Optional[Path] = None
         if external_qp_dir:
-            qp_dir = Path(external_qp_dir).expanduser()
+            src_dir = Path(external_qp_dir).expanduser()
+            qp_dir, _materialized_tmpdir = self._materialize_qp_dir(src_dir, qp)
             cmd.append(f"--ExternalQPMapDir={qp_dir}")
             env["VTM_EXTERNAL_QP_DIR"] = str(qp_dir)
-            logger.info("External QP maps: %s", qp_dir)
+            logger.info(
+                "External QP maps: %s (Q_base=%d%s)",
+                qp_dir, qp,
+                " [composed from delta]" if _materialized_tmpdir else " [absolute]",
+            )
         else:
             env.pop("VTM_EXTERNAL_QP_DIR", None)
 
@@ -181,13 +203,17 @@ class VTMEncoder:
         t_start = time.time()
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                env=env,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    env=env,
+                )
+            finally:
+                if _materialized_tmpdir is not None:
+                    shutil.rmtree(_materialized_tmpdir, ignore_errors=True)
             encoding_time = time.time() - t_start
 
             full_log = result.stdout + "\n" + result.stderr
@@ -257,6 +283,8 @@ class VTMEncoder:
 
         except subprocess.TimeoutExpired:
             elapsed = time.time() - t_start
+            if _materialized_tmpdir is not None:
+                shutil.rmtree(_materialized_tmpdir, ignore_errors=True)
             logger.error("VTM encode timed out after %.0fs (limit=%ds)", elapsed, effective_timeout)
             return EncodeResult(
                 success=False,
@@ -268,6 +296,93 @@ class VTMEncoder:
                 psnr_y=0, psnr_u=0, psnr_v=0,
                 error_msg=f"Encoding timed out after {effective_timeout}s",
             )
+
+    @staticmethod
+    def _detect_qp_format(qp_file: Path) -> str:
+        """Detect whether a QP-map text file stores absolute QP or deltas.
+
+        Reads the first line of the file and looks for ``type=absolute`` /
+        ``type=delta`` tags emitted by the Phase 1 exporter. If no tag is
+        present (legacy pilot v1 files) the format is assumed ``absolute``.
+
+        Returns one of: ``"absolute"`` | ``"delta"``.
+        """
+        try:
+            with open(qp_file, "r", encoding="utf-8") as f:
+                header = f.readline()
+        except OSError:
+            return "absolute"
+        if _HEADER_TAG_DELTA in header:
+            return "delta"
+        return "absolute"
+
+    @classmethod
+    def _materialize_qp_dir(
+        cls,
+        src_dir: Path,
+        qp_base: int,
+    ) -> Tuple[Path, Optional[Path]]:
+        """Return a directory of ABSOLUTE per-CTU QP maps for VTM.
+
+        - If `src_dir` already contains absolute maps, return it unchanged
+          (no temp directory is created).
+        - If `src_dir` contains DELTA maps (Phase 3 Q_base-agnostic format),
+          create a temporary directory populated with absolute maps defined
+          by ``Q_abs(r,c) = clip(qp_base + delta(r,c), _VVC_QP_MIN, _VVC_QP_MAX)``.
+
+        Returns:
+            (dir_to_pass_to_vtm, tmpdir_to_cleanup_or_None).
+        """
+        src_dir = Path(src_dir).expanduser()
+        if not src_dir.is_dir():
+            raise FileNotFoundError(f"QP map directory does not exist: {src_dir}")
+
+        qp_files = sorted(src_dir.glob("qp_*.txt"))
+        if not qp_files:
+            # Nothing to compose — pass through and let VTM raise a clean error.
+            return src_dir, None
+
+        fmt = cls._detect_qp_format(qp_files[0])
+        if fmt == "absolute":
+            return src_dir, None
+
+        # Delta format — compose with qp_base into a temp directory.
+        tmpdir = Path(tempfile.mkdtemp(prefix="vtm_qp_abs_"))
+        qp_min_clamp = _VVC_QP_MIN
+        qp_max_clamp = _VVC_QP_MAX
+
+        for src_file in qp_files:
+            with open(src_file, "r", encoding="utf-8") as f:
+                header = f.readline().rstrip("\n")
+                rows: list[list[int]] = []
+                for raw_line in f:
+                    stripped = raw_line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    # Handle both "+2 -6 0" and "34 26 32" tokens.
+                    tokens = stripped.split()
+                    row_vals = [
+                        max(qp_min_clamp, min(qp_max_clamp, qp_base + int(tok)))
+                        for tok in tokens
+                    ]
+                    rows.append(row_vals)
+
+            out_file = tmpdir / src_file.name
+            with open(out_file, "w", encoding="utf-8") as f:
+                # Rewrite header with the composition annotation for traceability.
+                f.write(
+                    header.replace(_HEADER_TAG_DELTA, _HEADER_TAG_ABSOLUTE)
+                    + f" composed_from_delta=True base_qp={qp_base}\n"
+                )
+                for row_vals in rows:
+                    f.write(" ".join(str(v) for v in row_vals) + "\n")
+
+        logger.debug(
+            "Materialized %d absolute-QP files from delta maps into %s "
+            "(base_qp=%d, clamp=[%d,%d])",
+            len(qp_files), tmpdir, qp_base, qp_min_clamp, qp_max_clamp,
+        )
+        return tmpdir, tmpdir
 
     @staticmethod
     def _psnr_from_yuv(
