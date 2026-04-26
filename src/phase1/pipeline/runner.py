@@ -38,12 +38,29 @@ from phase1.export.summary_writer import (
     write_frame_summaries,
     write_aggregate_summary,
 )
-from phase1.viz.visualizer import (
-    save_field_overlay,
-    save_qp_overlay,
-    save_comparison_panel,
-    save_temporal_qp_plot,
-)
+try:
+    from phase1.viz.visualizer import (
+        save_field_overlay,
+        save_qp_overlay,
+        save_comparison_panel,
+        save_temporal_qp_plot,
+    )
+    _VIZ_AVAILABLE = True
+except ModuleNotFoundError:
+    _VIZ_AVAILABLE = False
+
+    def save_field_overlay(*args, **kwargs):   # type: ignore[misc]
+        pass
+
+    def save_qp_overlay(*args, **kwargs):      # type: ignore[misc]
+        pass
+
+    def save_comparison_panel(*args, **kwargs):  # type: ignore[misc]
+        pass
+
+    def save_temporal_qp_plot(*args, **kwargs):  # type: ignore[misc]
+        pass
+
 from phase1.utils.log import setup_logging, get_logger
 from phase1.utils.timer import timer
 
