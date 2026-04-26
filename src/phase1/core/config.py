@@ -50,7 +50,20 @@ class FieldConfig(BaseModel):
     )
     alpha_w: float = Field(0.75, description="Width scaling for normalized distance")
     alpha_h: float = Field(0.75, description="Height scaling for normalized distance")
-    superposition: str = Field("sum", description="sum | max")
+    superposition: str = Field(
+        "sum",
+        description="sum | max | lp. "
+        "'sum' and 'max' are legacy shortcuts. "
+        "'lp' uses the L_p-norm aggregator controlled by `p_norm` — the "
+        "Phase 3 academic generalization "
+        "(see 11_PHASE3_RESEARCH_PROTOCOL.md §2 Level 4).",
+    )
+    p_norm: float = Field(
+        float("inf"),
+        description="L_p-norm exponent when superposition='lp'. "
+        "p=1 → sum, p=2 → Euclidean blend, p=4 → near-max, p=inf → hard max. "
+        "Unused when superposition ∈ {sum, max}.",
+    )
 
 
 class MassConfig(BaseModel):
@@ -77,12 +90,25 @@ class NormalizationConfig(BaseModel):
 
 
 class QPMappingConfig(BaseModel):
-    qp_base: int = Field(32, ge=0, le=63)
+    qp_base: int = Field(
+        32,
+        ge=0,
+        le=63,
+        description="Calibration base QP. Used only by the LEGACY absolute-QP "
+        "exporter. Phase 3 delta-QP pipeline is Q_base-agnostic.",
+    )
     delta_roi: float = Field(10.0, ge=0.0, description="Max QP decrease for ROI")
     delta_bg: float = Field(6.0, ge=0.0, description="Max QP increase for background")
     gamma_roi: float = Field(1.0, gt=0.0, description="ROI mapping curvature")
     gamma_bg: float = Field(1.0, gt=0.0, description="Background mapping curvature")
     mu: float = Field(0.3, ge=0.0, le=1.0, description="Foreground/background threshold")
+    # Phase 3 export clamps (see 11_PHASE3_RESEARCH_PROTOCOL.md §1.4).
+    delta_clip_min: int = Field(
+        -8, le=0, description="Lower clamp on exported dQP (Phase 3)"
+    )
+    delta_clip_max: int = Field(
+        4, ge=0, description="Upper clamp on exported dQP (Phase 3)"
+    )
 
 
 class BoundedDynamicsConfig(BaseModel):
@@ -153,7 +179,17 @@ class OutputConfig(BaseModel):
     save_object_states: bool = True
     save_field_npy: bool = False
     save_qp_csv: bool = True
-    save_qp_vtm: bool = True
+    save_qp_vtm: bool = Field(
+        True,
+        description="Write legacy absolute-QP maps to qp_vtm/. Kept for "
+        "backward compatibility with pilot v1.",
+    )
+    save_qp_delta_vtm: bool = Field(
+        True,
+        description="Write Phase 3 delta-QP maps to qp_vtm_delta/. These are "
+        "Q_base-agnostic and are composed with the run-time Q_base by the "
+        "Phase 2 encoder wrapper.",
+    )
     save_summary_json: bool = True
     save_frame_summaries: bool = True
 

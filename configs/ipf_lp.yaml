@@ -1,0 +1,118 @@
+# =============================================================================
+# IPF Phase 3 — Generalized L_p-norm Superposition
+# =============================================================================
+# Academic generalization of the MAX / SUM choice.
+# Governed by 11_PHASE3_RESEARCH_PROTOCOL.md §2 Level 4.
+#
+# Set field.p_norm to the exponent you want to run:
+#   p = 1.0       → pure SUM   (equivalent to legacy superposition=sum)
+#   p = 2.0       → Euclidean blend
+#   p = 4.0       → near-max, differentiable
+#   p = .inf      → hard MAX   (equivalent to legacy superposition=max = IPF v2)
+#
+# The Phase 3 ablation protocol compares these four values head-to-head.
+# Output format: DELTA QP (Q_base-agnostic). The Phase 2 encoder composes
+# Q_final = clip(Q_base + delta, 1, 51) at run time.
+# =============================================================================
+
+run_id: "ipf_lp_inf_run_001"   # template — override per-sequence in launcher
+video_path: ""
+output_dir: "~/Minh/ipf/phase1_outputs_v2"
+max_frames: null
+log_level: "INFO"
+
+detector:
+  model_name: "yolov8n.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  device: "cuda:0"
+  img_size: 640
+  classes: null
+
+tracker:
+  tracker_type: "bytetrack"
+  track_high_thresh: 0.5
+  track_low_thresh: 0.1
+  new_track_thresh: 0.6
+  track_buffer: 30
+  match_thresh: 0.8
+
+mass:
+  use_class_priority: true
+  use_track_age: true
+  age_warmup_frames: 5
+  class_priorities:
+    person: 1.0
+    car: 1.0
+    truck: 0.9
+    bus: 0.9
+    motorcycle: 0.8
+    bicycle: 0.8
+
+field:
+  beta: 2.0
+  eps_d: 0.001
+  eps_k: 1.0
+  alpha_w: 0.75
+  alpha_h: 0.75
+  superposition: "lp"          # Phase 3 aggregator
+  p_norm: .inf                 # override to 1.0, 2.0, 4.0 for ablation
+
+normalization:
+  rho: 0.95
+  percentile_low: 5.0
+  percentile_high: 95.0
+  eps_n: 0.00000001
+
+qp_mapping:
+  qp_base: 32                  # used only by the LEGACY absolute exporter
+  delta_roi: 10.0
+  delta_bg: 6.0
+  gamma_roi: 1.0
+  gamma_bg: 1.0
+  mu: 0.3
+  delta_clip_min: -8           # exported dQP lower clamp
+  delta_clip_max: 4            # exported dQP upper clamp
+
+bounded_dynamics:
+  eta: 0.7
+  delta_slew: 3.0
+  qp_min: 10
+  qp_max: 51
+
+baselines:
+  m5_sigma_factor: 0.75
+  m6_alpha: 0.8
+  m7_cutoff_factor: 0.5
+  m8_blur_factor: 0.4
+
+ablation:
+  enabled: false
+  variants:
+    - A1
+    - A3
+    - A4
+    - A6
+    - M2
+    - M3
+
+ctu:
+  ctu_size: 128
+
+viz:
+  save_field_maps: true
+  save_qp_overlays: true
+  save_object_overlays: true
+  colormap: "jet"
+  overlay_alpha: 0.4
+  dpi: 100
+  save_every_n_frames: 1
+
+output:
+  save_object_states: true
+  save_field_npy: false
+  save_qp_csv: true
+  save_qp_vtm: true            # legacy absolute (debug)
+  save_qp_delta_vtm: true      # Phase 3 primary — REQUIRED
+  save_summary_json: true
+  save_frame_summaries: true

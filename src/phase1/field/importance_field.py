@@ -126,6 +126,54 @@ def compute_single_object_gaussian_field(
     return phi
 
 
+def _lp_aggregate(fields: np.ndarray, mode: str, p: float) -> np.ndarray:
+    """Aggregate a stack of per-object fields along axis 0.
+
+    Academic core of Phase 3 — see `11_PHASE3_RESEARCH_PROTOCOL.md`
+    §2 Level 4.  The L_p-norm family
+
+        Phi_Lp(r,c) = ( sum_j phi_j(r,c)^p )^(1/p)
+
+    is continuous in p ∈ (0, ∞] and strictly interpolates between
+    sum (p=1) and hard max (p=inf). This function dispatches on the
+    `mode` string, keeping the legacy `sum` and `max` paths for
+    backward compatibility and exposing the new `lp` path.
+
+    Args:
+        fields: float64 array of shape (n_objects, n_rows, n_cols),
+            non-negative. Assumed all phi_j >= 0 by construction.
+        mode: aggregation mode: ``"sum"`` | ``"max"`` | ``"lp"``.
+        p: exponent used when ``mode == "lp"``. May be ``float("inf")``,
+            in which case hard max is used (matches the p → ∞ limit).
+
+    Returns:
+        float64 array of shape (n_rows, n_cols).
+    """
+    if mode == "sum":
+        return np.sum(fields, axis=0)
+    if mode == "max":
+        return np.max(fields, axis=0)
+    if mode == "lp":
+        if not np.isfinite(p):
+            return np.max(fields, axis=0)
+        if p <= 0:
+            raise ValueError(f"p_norm must be positive, got {p}")
+        # Numerically stable L_p:  (sum x_j^p)^(1/p) = m * (sum (x_j/m)^p)^(1/p)
+        # where m = max_j x_j.  Avoids overflow for large p and keeps the
+        # kernel magnitude well-scaled when m is small.
+        m = np.max(fields, axis=0)
+        # Avoid 0/0 — when all phi_j == 0 at a cell, aggregate is 0.
+        safe_m = np.where(m > 0.0, m, 1.0)
+        normed = fields / safe_m[None, :, :]
+        powsum = np.sum(normed ** p, axis=0)
+        agg = m * (powsum ** (1.0 / p))
+        # Restore zeros where the max was zero.
+        return np.where(m > 0.0, agg, 0.0)
+    raise ValueError(
+        f"Unknown superposition mode '{mode}'. Expected sum | max | lp."
+    )
+
+
 def compute_superposition_field(
     objects: list[ObjectState],
     frame_h: int,
@@ -135,14 +183,17 @@ def compute_superposition_field(
 ) -> tuple[np.ndarray, int, int]:
     """Compute the total importance field via superposition of all objects.
 
-    Phi_t(x,y) = sum_j phi_{j,t}(x,y)        (if mode = "sum")
-    Phi_t(x,y) = max_j phi_{j,t}(x,y)        (if mode = "max")
+    Aggregator is chosen by ``field_cfg.superposition``:
+
+        - ``"sum"``  → Phi(r,c) = sum_j phi_j(r,c)            (legacy)
+        - ``"max"``  → Phi(r,c) = max_j phi_j(r,c)            (legacy, IPF v2)
+        - ``"lp"``   → Phi(r,c) = (sum_j phi_j^p)^(1/p)        (Phase 3, p = field_cfg.p_norm)
 
     Args:
         objects: List of ObjectState for current frame.
         frame_h: Frame height in pixels.
         frame_w: Frame width in pixels.
-        field_cfg: Field parameters (beta, eps, alpha, superposition mode).
+        field_cfg: Field parameters (beta, eps, alpha, superposition mode, p_norm).
         ctu_cfg: CTU size parameters.
 
     Returns:
@@ -159,14 +210,13 @@ def compute_superposition_field(
         axis=0,
     )  # shape: (n_objects, n_rows, n_cols)
 
-    if field_cfg.superposition == "max":
-        total_field = np.max(fields, axis=0)
-    else:
-        total_field = np.sum(fields, axis=0)
+    total_field = _lp_aggregate(fields, field_cfg.superposition, field_cfg.p_norm)
 
     logger.debug(
-        "Field: %d objects, range [%.4f, %.4f]",
+        "Field: %d objects, mode=%s, p=%s, range [%.4f, %.4f]",
         len(objects),
+        field_cfg.superposition,
+        field_cfg.p_norm,
         float(np.min(total_field)),
         float(np.max(total_field)),
     )
@@ -196,9 +246,5 @@ def compute_gaussian_superposition_field(
         axis=0,
     )
 
-    if field_cfg.superposition == "max":
-        total_field = np.max(fields, axis=0)
-    else:
-        total_field = np.sum(fields, axis=0)
-
+    total_field = _lp_aggregate(fields, field_cfg.superposition, field_cfg.p_norm)
     return total_field, n_rows, n_cols

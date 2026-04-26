@@ -25,10 +25,14 @@ from phase1.io.video_reader import VideoReader
 from phase1.tracking.detector_tracker import DetectorTracker
 from phase1.field.importance_field import compute_superposition_field
 from phase1.control.normalizer import TemporalNormalizer
-from phase1.control.qp_mapper import map_field_to_qp
+from phase1.control.qp_mapper import map_field_to_qp, map_field_to_delta_qp
 from phase1.control.bounded_dynamics import BoundedQPController
 from phase1.export.state_writer import StateWriter
-from phase1.export.qp_exporter import export_qp_vtm, export_qp_csv
+from phase1.export.qp_exporter import (
+    export_qp_vtm,
+    export_delta_qp_vtm,
+    export_qp_csv,
+)
 from phase1.export.summary_writer import (
     write_run_metadata,
     write_frame_summaries,
@@ -70,7 +74,8 @@ class Phase1Pipeline:
         self.dir_states = self.run_dir / "object_states"
         self.dir_fields = self.run_dir / "fields"
         self.dir_qp = self.run_dir / "qp_maps"
-        self.dir_qp_vtm = self.run_dir / "qp_vtm"
+        self.dir_qp_vtm = self.run_dir / "qp_vtm"              # legacy absolute QP
+        self.dir_qp_delta_vtm = self.run_dir / "qp_vtm_delta"  # Phase 3 delta QP
         self.dir_viz = self.run_dir / "viz"
         self.dir_panels = self.run_dir / "viz" / "panels"
         self.dir_logs = self.run_dir / "logs"
@@ -84,7 +89,8 @@ class Phase1Pipeline:
         """Create all output directories."""
         for d in [
             self.dir_states, self.dir_fields, self.dir_qp,
-            self.dir_qp_vtm, self.dir_viz, self.dir_panels, self.dir_logs,
+            self.dir_qp_vtm, self.dir_qp_delta_vtm,
+            self.dir_viz, self.dir_panels, self.dir_logs,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -240,11 +246,20 @@ class Phase1Pipeline:
         result.normalized_field = norm_field
 
         # --- Step 4: Raw QP Mapping ---
+        # Legacy absolute-QP path (kept for pilot v1 compatibility).
         raw_qp = map_field_to_qp(norm_field, self.cfg.qp_mapping)
         result.raw_qp_map = raw_qp
 
+        # Phase 3 delta-QP path (Q_base-agnostic). Identical asymmetric
+        # power-law mapping, just without the Q_base offset.
+        raw_delta_qp = map_field_to_delta_qp(norm_field, self.cfg.qp_mapping)
+
         # --- Step 5: Bounded QP Dynamics ---
+        # Apply temporal low-pass + slew-rate limiting to the absolute map.
+        # For the delta map we apply the SAME smoothing by subtracting qp_base
+        # so the two outputs remain consistent (they differ only by a constant).
         final_qp = self._qp_controller.apply(raw_qp)
+        final_delta_qp = final_qp - float(self.cfg.qp_mapping.qp_base)
         result.final_qp_map = final_qp
 
         # --- Step 6: Export QP Maps ---
@@ -253,6 +268,14 @@ class Phase1Pipeline:
                 final_qp,
                 self.dir_qp_vtm / f"qp_{frame_idx:06d}.txt",
                 frame_idx,
+            )
+        if self.cfg.output.save_qp_delta_vtm:
+            export_delta_qp_vtm(
+                final_delta_qp,
+                self.dir_qp_delta_vtm / f"qp_{frame_idx:06d}.txt",
+                frame_idx,
+                delta_min=self.cfg.qp_mapping.delta_clip_min,
+                delta_max=self.cfg.qp_mapping.delta_clip_max,
             )
 
         if self.cfg.output.save_qp_csv:
