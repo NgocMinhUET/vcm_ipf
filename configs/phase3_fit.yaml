@@ -16,21 +16,21 @@
 # output directory containing field_*.npy and qp_vtm_delta/.
 sequences:
   - name: MOT17-04-DPM
-    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-04-DPM/img1
+    frames_dir: ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1
     phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-04-DPM/M4
     n_frames: 50
     width: 1920
     height: 1080
     fps: 30
   - name: MOT17-09-DPM
-    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-09-DPM/img1
+    frames_dir: ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1
     phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-09-DPM/M4
     n_frames: 50
     width: 1920
     height: 1088
     fps: 30
   - name: MOT17-13-DPM
-    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-13-DPM/img1
+    frames_dir: ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1
     phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-13-DPM/M4
     n_frames: 50
     width: 1920
