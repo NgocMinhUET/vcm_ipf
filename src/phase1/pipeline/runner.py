@@ -298,6 +298,10 @@ class Phase1Pipeline:
         if self.cfg.output.save_qp_csv:
             export_qp_csv(final_qp, self.dir_qp / f"qp_{frame_idx:06d}.csv")
 
+        if self.cfg.output.save_field_npy:
+            np.save(self.dir_fields / f"field_{frame_idx:06d}.npy",
+                    norm_field.astype(np.float32))
+
         # --- Step 7: Visualization ---
         should_viz = (frame_idx % self.cfg.viz.save_every_n_frames == 0)
         if should_viz:

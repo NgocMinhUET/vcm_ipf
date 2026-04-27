@@ -110,7 +110,7 @@ viz:
 
 output:
   save_object_states: true
-  save_field_npy: false
+  save_field_npy: true          # Phase 3 fitter needs the raw Φ tensor
   save_qp_csv: true
   save_qp_vtm: true            # legacy absolute (debug)
   save_qp_delta_vtm: true      # Phase 3 primary — REQUIRED
