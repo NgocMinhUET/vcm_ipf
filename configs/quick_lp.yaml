@@ -1,0 +1,71 @@
+# =============================================================================
+# Phase 3 Stage 1 — Lp-norm Quick Comparison (10 frames, p ∈ {1, 2, 4, ∞})
+# =============================================================================
+# Compares four L_p superposition variants of M4 against M0 on a single
+# sequence (MOT17-04-DPM) at 10 frames.
+#
+# Purpose: Choose the best p BEFORE running the full 40-hour pilot_v2.
+#          Per pre-registered decision tree (§4.3 of 11_PHASE3_RESEARCH_PROTOCOL.md),
+#          the p with the best BD-Rate-Task on this quick pass is used in pilot_v2.
+#
+# Methods (method IDs map to Phase 1 output directories):
+#   M0   = uniform anchor (no maps)
+#   M4p1 = IPF Lp p=1 (sum superposition)
+#   M4p2 = IPF Lp p=2 (Euclidean blend)
+#   M4p4 = IPF Lp p=4 (near-max, differentiable)
+#   M4   = IPF Lp p=∞ (hard max = current IPF v2 with dQP fix)
+#
+# Prerequisite: run_lp_ablation.py must have generated maps for all four p values:
+#   PYTHONPATH=src python scripts/run_lp_ablation.py \
+#       --max-frames 50 --sequences MOT17-04-DPM --p-values 1 2 4 inf
+#
+# Grid: 1 sequence × 5 methods × 4 QPs × 10 frames = 20 runs ≈ 2 h
+# =============================================================================
+
+experiment_id: "quick_lp"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 3600
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 10
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  # Each "method" name maps to a different phase1 output prefix via the
+  # method_prefix_map below. Since Phase 2 uses a single prefix for all
+  # methods, we run this config FOUR times with different prefixes, or
+  # use the naming trick: method ID = "M4" in each run but with a
+  # different phase1_run_prefix per experiment_id.
+  #
+  # For this config we run M4 (p=inf) vs M0 as the primary comparison.
+  # To compare other p values, duplicate this file and change:
+  #   - experiment_id: "quick_lp_p1"
+  #   - phase1_run_prefix: "ipf_lp_p1_"
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase1_outputs_v2"
+  phase1_run_prefix: "ipf_lp_pinf_"   # ← change to ipf_lp_p1_, ipf_lp_p2_, ipf_lp_p4_
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1

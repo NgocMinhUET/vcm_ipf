@@ -1,0 +1,80 @@
+# =============================================================================
+# Phase 2 Pilot v2 — Phase 3 Lp-norm Ablation (paper-quality run)
+# =============================================================================
+# Key changes from pilot_v1:
+#   - QP maps: RELATIVE dQP (Q_base-agnostic), calibration bug fixed
+#   - Superposition: p=inf (= max, same as IPF v2 but now with dQP)
+#   - phase1_output_dir points to phase1_outputs_v2 (dQP tree)
+#
+# Grid: 3 sequences × 5 methods × 4 QPs × 50 frames = 60 runs ≈ 30–40 h
+#
+# IMPORTANT: Run AFTER the Lp ablation script has produced maps for
+#   phase1_outputs_v2/ipf_lp_pinf_{sequence}/M4/qp_vtm_delta/
+# (i.e. after: PYTHONPATH=src python scripts/run_lp_ablation.py
+#              --max-frames 50 --sequences MOT17-{02,04,09}-DPM --p-values inf)
+#
+# Baselines M1/M5/M6 still use the OLD phase1_outputs (absolute QP, pilot_v1
+# layout) because they were not re-run through the dQP pipeline.  Only M4
+# uses the new dQP maps. M0 needs no maps.
+# =============================================================================
+
+experiment_id: "pilot_v2"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  # pilot_v2 compares M0 (anchor) vs M4 (Phase 3 dQP, p=inf) only.
+  # M1/M5/M6 require their own dQP re-generation before they can be added.
+  # These will be included in pilot_v3 after the Lp-norm comparison is done.
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase1_outputs_v2"
+  phase1_run_prefix: "ipf_lp_pinf_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
