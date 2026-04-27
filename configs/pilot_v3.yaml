@@ -51,15 +51,15 @@ sequences:
     n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
 
-  - name: "MOT17-13-DPM"
-    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-13-DPM.yuv"
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
     width: 1920
     height: 1152
     original_width: 1920
     original_height: 1080
-    fps: 25
+    fps: 30
     n_frames: 50
-    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1"
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
 
 encoding:
   qp_points: [27, 32, 37, 42]

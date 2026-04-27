@@ -29,13 +29,13 @@ sequences:
     width: 1920
     height: 1088
     fps: 30
-  - name: MOT17-13-DPM
-    frames_dir: ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1
-    phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-13-DPM/M4
+  - name: MOT17-02-DPM
+    frames_dir: ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1
+    phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-02-DPM/M4
     n_frames: 50
     width: 1920
-    height: 1088
-    fps: 25
+    height: 1080
+    fps: 30
 
 # Pilot v1 summary that supplies M0 per-QP per-frame bits for rate calibration.
 # If you have not run pilot_v1 yet, run smoke_v5 with M0 across the QP grid
