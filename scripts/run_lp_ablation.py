@@ -96,9 +96,30 @@ def run_one(
     cfg.field.superposition = "lp"
     cfg.field.p_norm = p
 
-    # Paths and run identity.
-    cfg.output_dir = str(output_dir)
-    cfg.run_id = f"ipf_lp_p{_p_tag(p)}_{sequence}"
+    # ---------------------------------------------------------------
+    # Directory layout contract with Phase 2 _find_qp_maps():
+    #
+    #   Phase 2 looks for:
+    #     {phase1_output_dir}/{prefix}{sequence}/M4/qp_vtm_delta/
+    #
+    #   We achieve this by setting:
+    #     output_dir = base_output_dir / f"ipf_lp_p{p}_{sequence}"
+    #     run_id     = "M4"
+    #
+    #   Phase 1 runner writes to: output_dir / run_id / qp_vtm_delta/
+    #   i.e.  base_output_dir / ipf_lp_p{p}_{sequence} / M4 / qp_vtm_delta/
+    #
+    # Phase 2 smoke.yaml uses:
+    #   phase1_output_dir = ~/Minh/ipf/phase1_outputs_v2
+    #   phase1_run_prefix = ipf_lp_pinf_         (for p=inf)
+    # so it searches:
+    #   phase1_outputs_v2 / ipf_lp_pinf_MOT17-04-DPM / M4 / qp_vtm_delta/
+    # which matches exactly.
+    # ---------------------------------------------------------------
+    seq_run_dir = output_dir / f"ipf_lp_p{_p_tag(p)}_{sequence}"
+    cfg.output_dir = str(seq_run_dir)
+    cfg.run_id = "M4"
+
     cfg.video_path = str(_resolve_video(data_root, sequence))
     if max_frames is not None:
         cfg.max_frames = max_frames
@@ -115,6 +136,7 @@ def run_one(
     print(f"    run_id   = {cfg.run_id}")
     print(f"    video    = {cfg.video_path}")
     print(f"    output   = {Path(cfg.output_dir) / cfg.run_id}")
+    print(f"    dQP dir  = {Path(cfg.output_dir) / cfg.run_id}/qp_vtm_delta/  (Phase 2 path)")
 
     pipeline = Phase1Pipeline(cfg)
     meta = pipeline.run()
