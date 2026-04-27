@@ -1,0 +1,93 @@
+# =============================================================================
+# Phase 3 — Surrogate-driven QP optimization config
+# =============================================================================
+# Governs the Stage B execution (rate surrogate + task surrogate +
+# parametric fitting + DNN fallback + apply_formula).
+#
+# Single source of truth for all paths used by:
+#   - phase2/scripts/run_phase3_pipeline.sh
+#   - phase2/src/phase2/phase3/{occlusion_saliency,rate_surrogate,
+#                                build_oracle,fit_parametric,
+#                                train_dnn,apply_formula}.py
+# =============================================================================
+
+# Sequences to process. Each entry MUST point to the original frames dir
+# (used by the saliency + rate surrogate) and to the matching Phase 1
+# output directory containing field_*.npy and qp_vtm_delta/.
+sequences:
+  - name: MOT17-04-DPM
+    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-04-DPM/img1
+    phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-04-DPM/M4
+    n_frames: 50
+    width: 1920
+    height: 1080
+    fps: 30
+  - name: MOT17-09-DPM
+    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-09-DPM/img1
+    phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-09-DPM/M4
+    n_frames: 50
+    width: 1920
+    height: 1088
+    fps: 30
+  - name: MOT17-13-DPM
+    frames_dir: ~/Minh/ipf/data/MOT17/train/MOT17-13-DPM/img1
+    phi_ipf_dir: ~/Minh/ipf/phase1_outputs_v2/ipf_lp_pinf_MOT17-13-DPM/M4
+    n_frames: 50
+    width: 1920
+    height: 1088
+    fps: 25
+
+# Pilot v1 summary that supplies M0 per-QP per-frame bits for rate calibration.
+# If you have not run pilot_v1 yet, run smoke_v5 with M0 across the QP grid
+# and point this to its experiment_summary.json.
+pilot_summary: ~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json
+
+# Output trees.
+output_root: ~/Minh/ipf/phase3_outputs
+
+# Sweep settings (kept conservative; expand once Stage B converges).
+qp_list: [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+
+# Saliency settings.
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: yolov8n.pt
+  confidence: 0.25
+  device: cuda:0
+
+# Oracle (surrogate-evaluated) sampling density.
+oracle:
+  samples_per_cell: 200       # CTU samples per (frame, QP, δ) trio
+  eta: 0.06                   # mAP sensitivity per QP step (calibrated later)
+  xi: 0.15                    # δ<0 vs δ>0 asymmetry
+
+# Lagrangian setting (kbps per mAP unit).  λ_task = 7400 ≈ MOT17-04 baseline.
+lambda_task: 7400.0
+
+# Bootstrap / cross-validation budget for fit_parametric.
+fit:
+  n_bootstrap: 200
+  enable_loso: true
+  levels:
+    - L1-linear
+    - L2-asym
+    - L3-Qadapt
+    - L4-Lp
+    - L5-softmax
+
+# Conditional Level 6 trigger — only train DNN if no parametric Level wins
+# (val_bd_rate_task >= 0 with CI excluding 0). Otherwise it is skipped.
+dnn_fallback:
+  enable_if_no_winner: true
+  lambda_smooth: 0.05
+  lambda_reg: 1.0e-4
+  restarts: 4
+
+# Pilot encode after fitting.
+apply:
+  per_qp: false               # one universal δ-map per frame; Q_b applied at runtime
+  delta_min: -8
+  delta_max: 4

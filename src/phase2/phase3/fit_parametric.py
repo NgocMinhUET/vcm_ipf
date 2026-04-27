@@ -265,57 +265,93 @@ def load_oracle(path: Path) -> OracleData:
 
 
 def fit_rate_surrogate(data: OracleData) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """Linear regression ``ΔR ≈ β · δ`` per (sequence, Q_base).
+    """Per-CTU rate model from R-λ theory.
 
-    Returns a closure ``R_hat(features, delta) -> predicted ΔR``.
-    Rate response to small QP perturbations is nearly linear per CTU
-    (R-λ theory, §4.1 of the protocol). We therefore fit a single
-    coefficient per (sequence, Q_base) pair and assume additivity.
+    The build_oracle script emits per-CTU ``delta_rate_kbps`` rows that are
+    already proportional to the closed-form
+
+        ΔR_c(δ) = K_c · (2^{-(Q_b+δ)/6} - 2^{-Q_b/6})
+
+    so a single global multiplicative scale ``s_seq_qb`` is sufficient
+    to absorb residual systematic mismatch per (sequence, Q_b). When
+    feature column 6 (``K_c`` if available) is non-zero we use it
+    directly; otherwise we regress δ → ΔR linearly.
     """
     keys = list(zip(data.sequence.tolist(), data.q_base.tolist()))
-    beta: Dict[Tuple[str, int], float] = {}
+    has_K = data.features.shape[1] > 6 and float(np.std(data.features[:, 6])) > 0.0
+
+    cell_scale: Dict[Tuple[str, int], float] = {}
+    cell_beta: Dict[Tuple[str, int], float] = {}
     for key in set(keys):
-        seq_name, q = key
         mask = np.array([k == key for k in keys])
-        if mask.sum() < 3:
-            continue
         x = data.delta[mask]
         y = data.d_rate[mask]
-        beta[key] = float(np.linalg.lstsq(x[:, None], y, rcond=None)[0][0])
+        if mask.sum() < 3 or float(np.std(x)) == 0.0:
+            continue
+        if has_K:
+            q = float(key[1])
+            base = 2.0 ** (-q / 6.0)
+            pert = 2.0 ** (-(q + x) / 6.0)
+            pred = data.features[mask, 6] * (pert - base)
+            num = float(np.dot(pred, y))
+            den = float(np.dot(pred, pred)) + 1e-12
+            cell_scale[key] = num / den
+        cell_beta[key] = float(np.linalg.lstsq(x[:, None], y, rcond=None)[0][0])
 
-    mean_beta = float(np.mean(list(beta.values()))) if beta else 0.0
+    fallback_scale = (float(np.mean(list(cell_scale.values())))
+                      if cell_scale else 0.0)
+    fallback_beta = float(np.mean(list(cell_beta.values()))) if cell_beta else 0.0
 
     def r_hat(features: np.ndarray, delta: np.ndarray,
               q_base: int = 32, seq: str = "") -> np.ndarray:
-        b = beta.get((seq, int(q_base)), mean_beta)
+        if has_K and features.shape[1] > 6:
+            scale = cell_scale.get((seq, int(q_base)), fallback_scale)
+            base = 2.0 ** (-int(q_base) / 6.0)
+            pert = 2.0 ** (-(int(q_base) + delta) / 6.0)
+            return scale * features[:, 6] * (pert - base)
+        b = cell_beta.get((seq, int(q_base)), fallback_beta)
         return b * delta
 
     return r_hat
 
 
 def fit_map_surrogate(data: OracleData) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """Gaussian-kernel regression for the task-accuracy surrogate.
+    """Asymmetric per-CTU task surrogate.
 
-    Uses a simple Nadaraya-Watson estimator conditioned on (phi_max, delta)
-    — enough for early Phase 3 exploratory fits. Stage-5 protocol allows
-    upgrading to a full GP if residuals show structure.
+    Model: ΔmAP_c(δ) = phi_oracle(c) · [-η · max(0, δ) + ξη · max(0, -δ)]
+
+    We jointly fit (η, ξ) by least-squares on the oracle rows. When
+    column 5 of the feature matrix carries a saliency proxy we use it
+    directly; otherwise we fall back to phi_max as the saliency.
     """
-    X = np.column_stack([data.features[:, IDX_PHI_MAX], data.delta])
+    has_saliency = (data.features.shape[1] > 5
+                    and float(np.std(data.features[:, 5])) > 0.0)
+    sal_col = 5 if has_saliency else IDX_PHI_MAX
+
+    pos = np.maximum(0.0, data.delta)
+    neg = np.maximum(0.0, -data.delta)
+    sal = data.features[:, sal_col]
+    A = np.column_stack([-sal * pos, +sal * neg])
     y = data.d_map
-    sigma = 0.15  # bandwidth in normalized feature space
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    eta = float(coef[0])
+    eta_xi = float(coef[1])
+    xi = max(0.0, eta_xi / max(1e-9, eta)) if eta > 0 else 0.0
+    logger.info("map_surrogate fit: eta=%.5f  xi=%.3f  R²=%.3f",
+                eta, xi, _r2(A @ coef, y))
 
     def map_hat(features: np.ndarray, delta: np.ndarray,
                 q_base: int = 32, seq: str = "") -> np.ndarray:
-        Q = np.column_stack([features[:, IDX_PHI_MAX], delta])
-        # NW estimator; vectorized for small batches only.
-        preds = np.empty(len(Q))
-        for i, q in enumerate(Q):
-            w = np.exp(-np.sum((X - q) ** 2, axis=1) / (2 * sigma * sigma))
-            w_sum = w.sum() + 1e-12
-            preds[i] = float((w * y).sum() / w_sum)
-        return preds
+        sc = features[:, sal_col]
+        return -sc * eta * np.maximum(0.0, delta) + sc * eta * xi * np.maximum(0.0, -delta)
 
     return map_hat
+
+
+def _r2(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2)) + 1e-12
+    return 1.0 - ss_res / ss_tot
 
 
 # ---------------------------------------------------------------------------
@@ -361,57 +397,129 @@ def lagrangian_loss(
     return loss
 
 
+def _slice_oracle(o: OracleData, mask: np.ndarray) -> OracleData:
+    return OracleData(
+        features=o.features[mask],
+        delta=o.delta[mask],
+        d_rate=o.d_rate[mask],
+        d_map=o.d_map[mask],
+        sequence=o.sequence[mask],
+        q_base=o.q_base[mask],
+    )
+
+
+def _bd_rate_task_proxy(level: FunctionFamily, theta: np.ndarray,
+                         oracle: OracleData, r_hat: Callable, map_hat: Callable,
+                         lambda_task: float) -> float:
+    """Mean Lagrangian on (already-evaluated) oracle split."""
+    delta = np.clip(level.forward(oracle.features, theta), -8.0, 4.0)
+    keys = list(zip(oracle.sequence.tolist(), oracle.q_base.tolist()))
+    total, n = 0.0, 0
+    for key in set(keys):
+        seq, q = key
+        mask = np.array([k == key for k in keys])
+        r = r_hat(oracle.features[mask], delta[mask], q_base=q, seq=seq).mean()
+        m = map_hat(oracle.features[mask], delta[mask], q_base=q, seq=seq).mean()
+        total += float(r - lambda_task * m)
+        n += 1
+    return total / max(1, n)
+
+
+def _bootstrap_ci(level: FunctionFamily, theta: np.ndarray, oracle: OracleData,
+                   r_hat: Callable, map_hat: Callable, lambda_task: float,
+                   n_boot: int = 200, seed: int = 0) -> Tuple[float, float]:
+    """Percentile bootstrap CI on the val_bd_rate_task proxy."""
+    rng = np.random.default_rng(seed)
+    N = len(oracle.delta)
+    if N < 8:
+        return (float("nan"), float("nan"))
+    samples = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, N, N)
+        boot = _slice_oracle(oracle, idx)
+        try:
+            samples.append(_bd_rate_task_proxy(level, theta, boot,
+                                               r_hat, map_hat, lambda_task))
+        except Exception:  # noqa: BLE001
+            continue
+    if not samples:
+        return (float("nan"), float("nan"))
+    s = np.asarray(samples)
+    return float(np.percentile(s, 2.5)), float(np.percentile(s, 97.5))
+
+
+def _fit_once(level: FunctionFamily, oracle: OracleData,
+               r_hat: Callable, map_hat: Callable, lambda_task: float,
+               seed: int = 0) -> Tuple[np.ndarray, float, bool]:
+    from scipy.optimize import minimize, differential_evolution
+    loss = lagrangian_loss(
+        level, oracle.features, oracle.q_base, oracle.sequence,
+        r_hat, map_hat, lambda_task,
+    )
+    if level.name in {"L4-Lp", "L5-softmax"}:
+        result = differential_evolution(
+            loss, bounds=list(level.bounds),
+            seed=seed, tol=1e-4, maxiter=40, polish=True, updating="deferred",
+            workers=1,
+        )
+    else:
+        result = minimize(
+            loss, level.init, method="L-BFGS-B", bounds=list(level.bounds),
+            options={"maxiter": 200, "ftol": 1e-6},
+        )
+    return result.x, float(result.fun), bool(result.success)
+
+
 def fit_level(
     level: FunctionFamily,
     oracle: OracleData,
     r_hat: Callable,
     map_hat: Callable,
     lambda_task: float,
+    n_bootstrap: int = 200,
+    cross_validate: bool = True,
 ) -> FitResult:
-    try:
-        from scipy.optimize import minimize, differential_evolution
-    except ImportError as exc:
-        raise SystemExit(f"scipy required: {exc}")
+    """Fit one Level with global optimum + LOSO CV + bootstrap CI."""
+    theta, loss, conv = _fit_once(level, oracle, r_hat, map_hat, lambda_task)
+    bd_proxy = _bd_rate_task_proxy(level, theta, oracle, r_hat, map_hat, lambda_task)
+    ci_lo, ci_hi = _bootstrap_ci(level, theta, oracle, r_hat, map_hat,
+                                  lambda_task, n_boot=n_bootstrap)
 
-    loss = lagrangian_loss(
-        level, oracle.features, oracle.q_base, oracle.sequence,
-        r_hat, map_hat, lambda_task,
-    )
+    extra: Dict[str, float] = {
+        "val_bd_rate_task_ci_lo": ci_lo,
+        "val_bd_rate_task_ci_hi": ci_hi,
+    }
 
-    # Smooth levels → L-BFGS-B; Level 4 has a non-smooth p sweep → DE.
-    if level.name in {"L4-Lp", "L5-softmax"}:
-        result = differential_evolution(
-            loss, bounds=list(level.bounds),
-            seed=0, tol=1e-4, maxiter=40, polish=True, updating="deferred",
-            workers=1,
-        )
-        theta = result.x
-        converged = result.success
-    else:
-        result = minimize(
-            loss, level.init, method="L-BFGS-B", bounds=list(level.bounds),
-            options={"maxiter": 200, "ftol": 1e-6},
-        )
-        theta = result.x
-        converged = result.success
-
-    # Validation metric: mean ΔR and ΔmAP on the full oracle split.
-    delta_star = level.forward(oracle.features, theta)
-    delta_star = np.clip(delta_star, -8.0, 4.0)
-
-    # Crude BD-Rate-Task proxy: mean ΔR / lambda_task − ΔmAP, normalized.
-    r_pred = r_hat(oracle.features, delta_star)
-    m_pred = map_hat(oracle.features, delta_star)
-    bd_proxy = float(np.mean(r_pred) - lambda_task * np.mean(m_pred))
+    if cross_validate:
+        seqs = sorted(set(oracle.sequence.tolist()))
+        if len(seqs) >= 2:
+            cv_losses = []
+            for held in seqs:
+                tr_mask = oracle.sequence != held
+                te_mask = oracle.sequence == held
+                if tr_mask.sum() < 16 or te_mask.sum() < 4:
+                    continue
+                tr = _slice_oracle(oracle, tr_mask)
+                te = _slice_oracle(oracle, te_mask)
+                r_h_tr = fit_rate_surrogate(tr)
+                m_h_tr = fit_map_surrogate(tr)
+                theta_h, _, _ = _fit_once(level, tr, r_h_tr, m_h_tr, lambda_task)
+                cv_losses.append(_bd_rate_task_proxy(level, theta_h, te,
+                                                     r_h_tr, m_h_tr, lambda_task))
+            if cv_losses:
+                extra["loso_mean_bd_rate_task"] = float(np.mean(cv_losses))
+                extra["loso_std_bd_rate_task"] = float(np.std(cv_losses))
+                extra["loso_n_folds"] = float(len(cv_losses))
 
     return FitResult(
         level=level.name,
         theta=theta.tolist(),
         bounds=[list(b) for b in level.bounds],
-        val_loss=float(result.fun),
+        val_loss=float(loss),
         val_bd_rate_task=bd_proxy,
         val_n_samples=int(len(oracle.delta)),
-        converged=bool(converged),
+        converged=bool(conv),
+        extra=extra,
     )
 
 
@@ -431,6 +539,10 @@ def main() -> None:
         default=7400.0,
         help="kbps per mAP unit (§3.3 default from MOT17-04 pilot).",
     )
+    parser.add_argument("--n-bootstrap", type=int, default=200,
+                        help="Bootstrap samples for the BD-Rate-Task CI.")
+    parser.add_argument("--no-cv", action="store_true",
+                        help="Disable LOSO cross-validation (faster, less rigorous).")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -455,9 +567,19 @@ def main() -> None:
             logger.warning("Unknown level %s — skipping", name)
             continue
         logger.info("=== Fitting %s ===", name)
-        fit = fit_level(family, oracle, r_hat, map_hat, args.lambda_task)
-        logger.info("  loss=%.4f  theta=%s  converged=%s",
-                    fit.val_loss, fit.theta, fit.converged)
+        fit = fit_level(family, oracle, r_hat, map_hat, args.lambda_task,
+                        n_bootstrap=args.n_bootstrap,
+                        cross_validate=not args.no_cv)
+        logger.info("  loss=%.4f  bd_proxy=%.4f  ci=[%.4f, %.4f]  theta=%s",
+                    fit.val_loss, fit.val_bd_rate_task,
+                    fit.extra.get("val_bd_rate_task_ci_lo", float("nan")),
+                    fit.extra.get("val_bd_rate_task_ci_hi", float("nan")),
+                    [round(t, 4) for t in fit.theta])
+        if "loso_mean_bd_rate_task" in fit.extra:
+            logger.info("  LOSO mean=%.4f  std=%.4f  folds=%d",
+                        fit.extra["loso_mean_bd_rate_task"],
+                        fit.extra["loso_std_bd_rate_task"],
+                        int(fit.extra["loso_n_folds"]))
         results.append(fit)
 
     best = min(results, key=lambda r: r.val_loss)
