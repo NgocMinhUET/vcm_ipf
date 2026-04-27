@@ -1,21 +1,22 @@
 # =============================================================================
-# Phase 2 SMOKE Configuration — fastest sanity check (~5–10 min total)
+# Phase 2 SMOKE v5 — Phase 3 dQP calibration verification (~10–15 min)
 # =============================================================================
-# Purpose:  Verify that the encode → decode → PSNR → mAP pipeline works
-#           end-to-end after any code change.  NOT for scientific results.
+# Purpose:  Verify that the Phase 3 delta-QP pipeline works correctly at ALL
+#           four QP points (not just the calibration QP=32).
+#           This is the key check that fixes the pilot v1 root cause.
 #
-# What you should see in the resulting experiment_summary.json:
-#   1. M0 and M4 produce DIFFERENT bitrates / PSNRs
-#      (if they're equal → BUG #1 still active)
-#   2. psnr_y_full != psnr_y_roi
-#      (if equal → BUG #2 still active)
-#   3. mAP50 > 0 for at least M0
-#      (if 0 → BUG #3 still active)
+# What you MUST see in experiment_summary.json for PASS:
+#   1. M0 != M4 bitrate at EVERY QP point (27, 32, 37, 42).
+#      At QP=37/42/47, pilot v1 had M4≈M0 → FIXED by dQP.
+#   2. M4 mAP50 >= M0 mAP50 at QP=32 (was +0.025 in pilot v1).
+#   3. mAP50 > 0 for both methods at all QPs.
+#   4. No "QP maps not found" warnings in the log.
+#      (If you see them → phase1_output_dir or prefix is wrong.)
 #
-# Grid:  1 sequence × 2 methods × 2 QPs × 5 frames = 4 runs
+# Grid:  1 sequence × 2 methods × 4 QPs × 5 frames = 8 runs
 # =============================================================================
 
-experiment_id: "smoke_v4"
+experiment_id: "smoke_v5"
 output_dir: "~/Minh/ipf/phase2_outputs"
 log_level: "INFO"
 
@@ -39,12 +40,14 @@ sequences:
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
 
 encoding:
-  # Two QPs at the extremes are enough to verify the pipeline.
-  qp_points: [27, 37]
-  # M0 = uniform anchor; M4 = our IPF v2.  If these differ, the patch works.
+  # Four QPs — critical for Phase 3: dQP maps must work correctly at ALL QPs,
+  # not just the calibration point (QP=32). smoke_v5 checks this explicitly.
+  qp_points: [27, 32, 37, 42]
+  # M0 = uniform anchor; M4 = Phase 3 Lp (p=inf) with relative dQP.
   methods: ["M0", "M4"]
-  phase1_output_dir: "~/Minh/ipf/phase1_outputs"
-  phase1_run_prefix: "multi_seq_"
+  # Phase 3 v2 outputs: Q_base-agnostic delta-QP maps.
+  phase1_output_dir: "~/Minh/ipf/phase1_outputs_v2"
+  phase1_run_prefix: "ipf_lp_pinf_"
 
 evaluation:
   compute_psnr: true
