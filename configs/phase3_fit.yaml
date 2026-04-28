@@ -64,8 +64,18 @@ oracle:
   eta: 0.06                   # mAP sensitivity per QP step (calibrated later)
   xi: 0.15                    # δ<0 vs δ>0 asymmetry
 
-# Lagrangian setting (kbps per mAP unit).  λ_task = 7400 ≈ MOT17-04 baseline.
-lambda_task: 7400.0
+# Lagrangian setting (kbps per mAP unit) — SURROGATE SCALE.
+#
+# Physical derivation (from pilot_v1 MOT17-04 QP=32):
+#   - Baseline rate M0: 667440 bits / 50fr = ~400 kbps at 30fps
+#   - Average K_c per CTU: 667440 / (135 * 50) = 99 bits/CTU/frame
+#   - ΔRate/CTU for δ=+1 QP step: 99*(2^{-33/6}−2^{-32/6})*30/1000 ≈ 0.035 kbps
+#   - ΔmAP/CTU (roi_weight=0.5, η=0.06 above threshold):  0.5*0.06*1 = 0.030 mAP
+#   - λ_balanced = ΔRate/CTU / ΔmAP/CTU = 0.035/0.030 ≈ 1.15 kbps/mAP
+#
+# Use 5.0 (2–4× above balance point) to slightly favor bitrate savings.
+# The real-world 7400 kbps/mAP is only valid for full-sequence VTM output.
+lambda_task: 5.0
 
 # Bootstrap / cross-validation budget for fit_parametric.
 fit:

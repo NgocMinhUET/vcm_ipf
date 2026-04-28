@@ -147,6 +147,16 @@ LEVEL1 = FunctionFamily(
 )
 
 # --- Level 2 (current IPF) ------------------------------------------------
+# Bounds are tightened vs the initial version:
+#   - mu_min = 0.25  (threshold cannot be lower than 25-th percentile; prevents
+#                     near-uniform treatment of all CTUs as ROI)
+#   - delta_roi_max = 8  (matches delta_clip_min in the encoder)
+#   - delta_bg_min  = 1  (background MUST receive some QP increase to save bits;
+#                         delta_bg=0 is degenerate: no rate savings at all)
+# These were the root cause of the boundary-stuck fit in the first run.
+_L2_BOUNDS = [(0.25, 0.7), (0.0, 8.0), (1.0, 8.0), (0.25, 4.0), (0.25, 4.0)]
+
+
 def _level2_forward(features: np.ndarray, theta: np.ndarray) -> np.ndarray:
     return asymmetric_map(features[:, IDX_PHI_MAX], theta)
 
@@ -154,8 +164,8 @@ def _level2_forward(features: np.ndarray, theta: np.ndarray) -> np.ndarray:
 LEVEL2 = FunctionFamily(
     name="L2-asym",
     dim=5,
-    init=np.array([0.3, 10.0, 6.0, 1.0, 1.0]),
-    bounds=[(0.05, 0.7), (0.0, 12.0), (0.0, 8.0), (0.25, 4.0), (0.25, 4.0)],
+    init=np.array([0.35, 6.0, 4.0, 1.0, 1.0]),
+    bounds=_L2_BOUNDS,
     forward=_level2_forward,
 )
 
@@ -171,7 +181,7 @@ LEVEL3 = FunctionFamily(
     name="L3-Qadapt",
     dim=6,
     init=np.concatenate([LEVEL2.init, [0.0]]),
-    bounds=list(LEVEL2.bounds) + [(-1.0, 1.0)],
+    bounds=list(_L2_BOUNDS) + [(-1.0, 1.0)],
     forward=_level3_forward,
 )
 
@@ -185,16 +195,13 @@ def _level4_forward(features: np.ndarray, theta: np.ndarray) -> np.ndarray:
 LEVEL4 = FunctionFamily(
     name="L4-Lp",
     dim=6,
-    init=np.concatenate([LEVEL2.init, [float("inf")]]),   # start at max
-    bounds=list(LEVEL2.bounds) + [(1.0, 32.0)],           # 32 ≈ effective inf
+    init=np.concatenate([LEVEL2.init, [float("inf")]]),
+    bounds=list(_L2_BOUNDS) + [(1.0, 32.0)],
     forward=_level4_forward,
 )
 
 # --- Level 5 (softmax smooth-max) -----------------------------------------
 def _level5_forward(features: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    # With precomputed aggregates we approximate softmax blending by
-    # interpolating between phi_mean (tau=0 ≈ 2x L2 / something) and
-    # phi_max (tau→∞). Using phi_sum as the tau=0 proxy.
     *theta2, tau = theta
     w = 1.0 - 1.0 / (1.0 + math.exp(-(tau - 3.0)))  # logistic blend
     phi_hat = (1.0 - w) * features[:, IDX_PHI_MAX] + w * features[:, IDX_PHI_SUM]
@@ -205,7 +212,7 @@ LEVEL5 = FunctionFamily(
     name="L5-softmax",
     dim=6,
     init=np.concatenate([LEVEL2.init, [5.0]]),
-    bounds=list(LEVEL2.bounds) + [(0.0, 10.0)],
+    bounds=list(_L2_BOUNDS) + [(0.0, 10.0)],
     forward=_level5_forward,
 )
 
@@ -316,22 +323,39 @@ def fit_rate_surrogate(data: OracleData) -> Callable[[np.ndarray, np.ndarray], n
 
 
 def fit_map_surrogate(data: OracleData) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """Asymmetric per-CTU task surrogate.
+    """Asymmetric per-CTU task surrogate with saliency threshold.
 
-    Model: ΔmAP_c(δ) = phi_oracle(c) · [-η · max(0, δ) + ξη · max(0, -δ)]
+    Model (corrected):
+        ΔmAP_c(δ) = roi_weight(c) · [−η · max(0, δ) + ξη · max(0, -δ)]
 
-    We jointly fit (η, ξ) by least-squares on the oracle rows. When
-    column 5 of the feature matrix carries a saliency proxy we use it
-    directly; otherwise we fall back to phi_max as the saliency.
+    where roi_weight = phi_oracle · I(phi_oracle > SAL_THRESH).
+
+    The threshold is critical: background CTUs (phi_oracle ≈ 0) should
+    give ZERO mAP response to any QP change (positive or negative), so
+    the optimizer is free to raise their QP (saving bits) without a
+    spurious mAP penalty. Without this threshold the optimizer always
+    converges to delta_bg=0 — the root cause of the degenerate first fit.
+
+    SAL_THRESH is set to the 50th percentile of phi_oracle values across
+    the whole oracle dataset so that roughly half the CTUs are considered
+    task-relevant. This is consistent with the measured ρ ≈ 0.30 which
+    implies moderate but non-trivial signal.
     """
     has_saliency = (data.features.shape[1] > 5
                     and float(np.std(data.features[:, 5])) > 0.0)
     sal_col = 5 if has_saliency else IDX_PHI_MAX
 
+    # Threshold at the median of the saliency column (robust to outliers).
+    sal_thresh = float(np.percentile(data.features[:, sal_col], 50.0))
+    logger.info("map_surrogate: sal_thresh (p50) = %.4f  sal_col=%d", sal_thresh, sal_col)
+
     pos = np.maximum(0.0, data.delta)
     neg = np.maximum(0.0, -data.delta)
-    sal = data.features[:, sal_col]
-    A = np.column_stack([-sal * pos, +sal * neg])
+    sal_raw = data.features[:, sal_col]
+    # roi_weight: saliency above threshold; zero below.
+    roi_w = np.where(sal_raw > sal_thresh, sal_raw, 0.0)
+
+    A = np.column_stack([-roi_w * pos, +roi_w * neg])
     y = data.d_map
     coef, *_ = np.linalg.lstsq(A, y, rcond=None)
     eta = float(coef[0])
@@ -339,11 +363,17 @@ def fit_map_surrogate(data: OracleData) -> Callable[[np.ndarray, np.ndarray], np
     xi = max(0.0, eta_xi / max(1e-9, eta)) if eta > 0 else 0.0
     logger.info("map_surrogate fit: eta=%.5f  xi=%.3f  R²=%.3f",
                 eta, xi, _r2(A @ coef, y))
+    # Ensure eta is positive (regression may flip sign if y ≈ 0 everywhere).
+    if eta <= 0:
+        eta = 0.06
+        xi = 0.15
+        logger.warning("map_surrogate: regression gave eta<=0, using physics defaults")
 
     def map_hat(features: np.ndarray, delta: np.ndarray,
                 q_base: int = 32, seq: str = "") -> np.ndarray:
         sc = features[:, sal_col]
-        return -sc * eta * np.maximum(0.0, delta) + sc * eta * xi * np.maximum(0.0, -delta)
+        w = np.where(sc > sal_thresh, sc, 0.0)
+        return -w * eta * np.maximum(0.0, delta) + w * eta * xi * np.maximum(0.0, -delta)
 
     return map_hat
 
