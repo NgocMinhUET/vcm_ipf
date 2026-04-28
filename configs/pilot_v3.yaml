@@ -63,11 +63,12 @@ sequences:
 
 encoding:
   qp_points: [27, 32, 37, 42]
-  # pilot_v3 = anchor + learned Phase 3 formula (uses M4 slot).
+  # pilot_v3 = M0 anchor + M4 oracle-direct (task-driven occlusion saliency).
+  # Maps are produced by apply_oracle_qp.py, stored under:
+  #   phase3_outputs/learned/oracle_{seq}/M4/qp_vtm_delta/
   methods: ["M0", "M4"]
-  # learned_{seq}/M4/qp_vtm_delta is produced by run_phase3_pipeline.sh.
   phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
-  phase1_run_prefix: "learned_"
+  phase1_run_prefix: "oracle_"
 
 evaluation:
   compute_psnr: true
