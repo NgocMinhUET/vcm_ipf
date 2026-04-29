@@ -17,5 +17,8 @@ setup(
         "opencv-python-headless>=4.5",
         "ultralytics>=8.0",
         "tqdm>=4.60",
+        # Phase 3 Stage C — LiteQP residual MLP trainer + model persistence.
+        "scikit-learn>=1.0",
+        "joblib>=1.1",
     ],
 )
