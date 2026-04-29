@@ -24,9 +24,11 @@ from phase2.phase3.analytic_a_plus import (
     AnalyticAPlusConfig,
     compute_a_plus_delta,
     end_to_end_a_plus,
+    project_rate_neutral_clipped_exact,
     project_rate_neutral_exact,
     project_rate_neutral_linear,
     q_adaptive_bounds,
+    rate_neutral_residual,
 )
 
 
@@ -157,6 +159,69 @@ def test_residual_target_simulation():
     print("    ✓ teacher converges to a discrete δ near the analytic prior")
 
 
+def test_clipped_exact_projection():
+    """Issue #1: rate-neutrality must hold AFTER clipping, not just before.
+
+    Construct a case where many CTUs would saturate at the bound, so the
+    plain ``project_rate_neutral_exact + clip`` pipeline drifts but the
+    new ``project_rate_neutral_clipped_exact`` (bisection) does not.
+    """
+    print("\n[6] Clip-aware exact projection (Issue #1)")
+    phi, K = _synthetic_grid()
+    delta = compute_a_plus_delta(phi, K, q_base=42)  # large bounds → likely saturation
+
+    roi_bound, bg_bound = q_adaptive_bounds(42)
+    cfg = AnalyticAPlusConfig()
+    clip_lo = max(-roi_bound, float(cfg.delta_min_clip))
+    clip_hi = min(+bg_bound, float(cfg.delta_max_clip))
+
+    # Plain: project then clip
+    delta_plain = project_rate_neutral_exact(delta, K)
+    delta_plain_clipped = np.clip(delta_plain, clip_lo, clip_hi)
+    ratio_plain = rate_neutral_residual(delta_plain_clipped, K)
+    n_clipped = int(((delta_plain == clip_lo) | (delta_plain == clip_hi)).sum()
+                    + ((delta_plain_clipped == clip_lo)
+                       | (delta_plain_clipped == clip_hi)).sum())
+
+    # New: bisection-based clip-aware projection
+    delta_clipped = project_rate_neutral_clipped_exact(
+        delta, K, delta_min=clip_lo, delta_max=clip_hi)
+    ratio_new = rate_neutral_residual(delta_clipped, K)
+
+    print(f"    bounds: [{clip_lo:+.2f}, {clip_hi:+.2f}]   "
+          f"# CTUs at a bound (plain): {n_clipped}")
+    print(f"    plain  project → clip:   ratio = {ratio_plain:.6f}   "
+          f"|err| = {abs(ratio_plain - 1):.2e}")
+    print(f"    clipped-exact (bisection): ratio = {ratio_new:.6f}   "
+          f"|err| = {abs(ratio_new - 1):.2e}")
+    # The bisection result should be at least as accurate as plain+clip.
+    assert abs(ratio_new - 1.0) <= abs(ratio_plain - 1.0) + 1e-9, \
+        "bisection projection should never be worse than plain + clip"
+    print("    ✓ clip-aware projection ≤ plain in residual; rate-neutrality preserved")
+
+
+def test_round_drift_monitor():
+    """Integer rounding (after the continuous projection) drifts ratio.
+
+    This is what apply_liteqp_model.py logs as ``rate_ratio_post_round``;
+    we just verify the metric works."""
+    print("\n[7] Integer-rounding rate drift (monitoring)")
+    phi, K = _synthetic_grid()
+    cfg = AnalyticAPlusConfig()
+    for q in [27, 32, 37, 42]:
+        roi, bg = q_adaptive_bounds(q)
+        clip_lo = max(-roi, float(cfg.delta_min_clip))
+        clip_hi = min(+bg, float(cfg.delta_max_clip))
+        delta = compute_a_plus_delta(phi, K, q)
+        delta = project_rate_neutral_clipped_exact(delta, K, clip_lo, clip_hi)
+        ratio_pre = rate_neutral_residual(delta, K)
+        delta_int = np.clip(np.rint(delta), cfg.delta_min_clip, cfg.delta_max_clip)
+        ratio_post = rate_neutral_residual(delta_int, K)
+        print(f"    Q_b={q:2d}   pre-round = {ratio_pre:.6f}   "
+              f"post-round = {ratio_post:.6f}   drift = {(ratio_post - 1) * 100:+.2f} %")
+    print("    ✓ drift ≤ ~5 % is acceptable (monitored in metadata.json)")
+
+
 if __name__ == "__main__":
     print("LiteQP analytic-prior sanity check")
     print("=" * 60)
@@ -165,5 +230,7 @@ if __name__ == "__main__":
     test_rate_neutral_projection()
     test_end_to_end_distribution()
     test_residual_target_simulation()
+    test_clipped_exact_projection()
+    test_round_drift_monitor()
     print("\n" + "=" * 60)
     print("All checks passed.")

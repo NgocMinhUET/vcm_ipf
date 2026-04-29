@@ -150,7 +150,52 @@ def fit_one_split(X_tr, y_tr, w_tr, X_va, y_va, residual_bound: float,
     pred_va = np.clip(pipeline.predict(X_va), -residual_bound, +residual_bound)
     mae = float(np.mean(np.abs(pred_va - y_va)))
     bias = float(np.mean(pred_va - y_va))
-    return pipeline, mae, bias
+    return pipeline, mae, bias, pred_va
+
+
+def bootstrap_ci(values: np.ndarray, n_boot: int = 500, alpha: float = 0.05,
+                 stat: str = "mean", seed: int = 0) -> Dict[str, float]:
+    """Percentile bootstrap CI on a 1-D residual array.
+
+    Parameters
+    ----------
+    values
+        Per-sample residuals (signed, NOT abs). MAE-bootstrap = bootstrap
+        of ``mean(|x|)``; bias-bootstrap = bootstrap of ``mean(x)``.
+    n_boot
+        Number of bootstrap resamples.
+    alpha
+        Two-sided significance level (default 0.05 → 95 % CI).
+    stat
+        Either ``"mae"`` (bootstrap mean absolute error) or
+        ``"bias"`` (bootstrap mean signed residual).
+    """
+    rng = np.random.default_rng(seed)
+    n = len(values)
+    if n == 0:
+        return {"point": float("nan"),
+                "ci_lo": float("nan"), "ci_hi": float("nan"),
+                "n_boot": 0}
+    boot = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        sample = values[idx]
+        if stat == "mae":
+            boot[b] = float(np.mean(np.abs(sample)))
+        elif stat == "bias":
+            boot[b] = float(np.mean(sample))
+        else:
+            raise ValueError(f"unknown stat={stat}")
+    if stat == "mae":
+        point = float(np.mean(np.abs(values)))
+    else:
+        point = float(np.mean(values))
+    return {
+        "point": point,
+        "ci_lo": float(np.quantile(boot, alpha / 2)),
+        "ci_hi": float(np.quantile(boot, 1 - alpha / 2)),
+        "n_boot": int(n_boot),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +216,12 @@ def main() -> None:
                              '"both" = LOSO splits + full-data fit (default)')
     parser.add_argument("--report", default="",
                         help="Optional JSON report path (default: alongside output)")
+    parser.add_argument("--n-bootstrap", type=int, default=500,
+                        help="Bootstrap resamples for MAE/bias CI (default 500). "
+                             "Set 0 to disable.")
+    parser.add_argument("--bootstrap-alpha", type=float, default=0.05,
+                        help="Two-sided significance level for bootstrap CI "
+                             "(default 0.05 = 95%% CI).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -198,36 +249,89 @@ def main() -> None:
     # ── LOSO cross-validation ──────────────────────────────────────────────
     if args.cv in ("loso", "both") and len(seqs) >= 2:
         loso_results = []
+        loso_pooled_residuals = []  # signed residuals from all hold-outs
         for held in seqs:
             mask_va = (seq == held)
             mask_tr = ~mask_va
             if mask_tr.sum() == 0:
                 continue
-            _, mae, bias = fit_one_split(
+            _, mae, bias, pred_va = fit_one_split(
                 X[mask_tr], y[mask_tr], w[mask_tr],
                 X[mask_va], y[mask_va],
                 args.residual_bound, args.max_iter, args.seed,
             )
-            logger.info("LOSO held-out=%-15s  MAE=%.3f  bias=%+.3f  (n_va=%d)",
-                        held, mae, bias, int(mask_va.sum()))
-            loso_results.append({
+            residuals = (pred_va - y[mask_va]).astype(np.float64)
+            loso_pooled_residuals.append(residuals)
+            entry = {
                 "held_out": held,
                 "n_train": int(mask_tr.sum()),
                 "n_val":   int(mask_va.sum()),
                 "mae":     mae,
                 "bias":    bias,
-            })
+            }
+            # Per-sequence bootstrap CI
+            if args.n_bootstrap > 0:
+                entry["mae_ci"] = bootstrap_ci(
+                    residuals, n_boot=args.n_bootstrap,
+                    alpha=args.bootstrap_alpha, stat="mae", seed=args.seed,
+                )
+                entry["bias_ci"] = bootstrap_ci(
+                    residuals, n_boot=args.n_bootstrap,
+                    alpha=args.bootstrap_alpha, stat="bias", seed=args.seed + 1,
+                )
+                logger.info(
+                    "LOSO held-out=%-15s  MAE=%.3f [%.3f, %.3f]  "
+                    "bias=%+.3f [%+.3f, %+.3f]  (n_va=%d)",
+                    held, mae, entry["mae_ci"]["ci_lo"], entry["mae_ci"]["ci_hi"],
+                    bias, entry["bias_ci"]["ci_lo"], entry["bias_ci"]["ci_hi"],
+                    int(mask_va.sum()),
+                )
+            else:
+                logger.info("LOSO held-out=%-15s  MAE=%.3f  bias=%+.3f  (n_va=%d)",
+                            held, mae, bias, int(mask_va.sum()))
+            loso_results.append(entry)
         report["loso"] = loso_results
         report["loso_mean_mae"] = float(np.mean([r["mae"] for r in loso_results]))
 
+        # Pooled bootstrap across all hold-out residuals.
+        if loso_pooled_residuals and args.n_bootstrap > 0:
+            pooled = np.concatenate(loso_pooled_residuals)
+            report["loso_pooled_mae_ci"] = bootstrap_ci(
+                pooled, n_boot=args.n_bootstrap,
+                alpha=args.bootstrap_alpha, stat="mae", seed=args.seed + 2,
+            )
+            report["loso_pooled_bias_ci"] = bootstrap_ci(
+                pooled, n_boot=args.n_bootstrap,
+                alpha=args.bootstrap_alpha, stat="bias", seed=args.seed + 3,
+            )
+            logger.info(
+                "LOSO pooled  MAE=%.3f [%.3f, %.3f]  bias=%+.3f [%+.3f, %+.3f]",
+                report["loso_pooled_mae_ci"]["point"],
+                report["loso_pooled_mae_ci"]["ci_lo"],
+                report["loso_pooled_mae_ci"]["ci_hi"],
+                report["loso_pooled_bias_ci"]["point"],
+                report["loso_pooled_bias_ci"]["ci_lo"],
+                report["loso_pooled_bias_ci"]["ci_hi"],
+            )
+
     # ── Full-data fit (used to deploy) ─────────────────────────────────────
     if args.cv in ("none", "both"):
-        full_pipe, full_mae, full_bias = fit_one_split(
+        full_pipe, full_mae, full_bias, full_pred = fit_one_split(
             X, y, w, X, y,                 # train MAE on full set (deployment)
             args.residual_bound, args.max_iter, args.seed,
         )
         report["full_train_mae"] = full_mae
         report["full_train_bias"] = full_bias
+        if args.n_bootstrap > 0:
+            full_resid = (full_pred - y).astype(np.float64)
+            report["full_train_mae_ci"]  = bootstrap_ci(
+                full_resid, n_boot=args.n_bootstrap,
+                alpha=args.bootstrap_alpha, stat="mae", seed=args.seed + 10,
+            )
+            report["full_train_bias_ci"] = bootstrap_ci(
+                full_resid, n_boot=args.n_bootstrap,
+                alpha=args.bootstrap_alpha, stat="bias", seed=args.seed + 11,
+            )
         logger.info("Full-data fit  train MAE=%.3f  bias=%+.3f", full_mae, full_bias)
     else:
         full_pipe = None

@@ -69,6 +69,8 @@ train:
   cv: "both"             # "loso" | "none" | "both"  (always run LOSO + full-fit)
   max_iter: 400
   seed: 20260429
+  n_bootstrap: 500       # bootstrap resamples for MAE / bias 95 % CIs (0 = off)
+  bootstrap_alpha: 0.05  # 95 % CI
 
 # ── Step 6 — apply to generate dQP maps ──────────────────────────────────────
 apply:

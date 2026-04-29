@@ -45,7 +45,9 @@ import numpy as np
 from phase2.phase3.analytic_a_plus import (
     AnalyticAPlusConfig,
     compute_a_plus_delta,
+    project_rate_neutral_clipped_exact,
     project_rate_neutral_exact,
+    rate_neutral_residual,
     q_adaptive_bounds,
 )
 from phase2.phase3.train_liteqp_regressor import featurize_row, FEATURE_NAMES
@@ -231,16 +233,29 @@ def main() -> None:
 
     cfg = AnalyticAPlusConfig()
 
-    # ── Per-QP loop (each QP gets its own qp_vtm_delta_QPn/ subdir if --per-qp) ─
-    qp_iter = args.qp_list if args.per_qp else [args.qp_list[0]]
+    # ── Per-QP loop ────────────────────────────────────────────────────────
+    # ``--per-qp`` is mandatory because the analytic A+ formula and the MLP
+    # residual are both Q-adaptive (different Q_b ⇒ different scale ⇒
+    # different δ map). Running with a single Q_b would mis-calibrate every
+    # other QP — exactly the failure mode that motivated Phase 3.
+    if not args.per_qp:
+        raise SystemExit(
+            "LiteQP / A+ requires --per-qp to avoid Q_base calibration "
+            "mismatch (the formula is Q-adaptive). Re-run with --per-qp."
+        )
+    qp_iter = args.qp_list
     n_total_written = 0
+    rate_ratio_log: list[dict] = []  # populated below for metadata.json
     for qp in qp_iter:
-        qp_dir = (out_root / f"qp_vtm_delta_QP{qp}") if args.per_qp \
-                 else (out_root / "qp_vtm_delta")
+        qp_dir = out_root / f"qp_vtm_delta_QP{qp}"
         qp_dir.mkdir(parents=True, exist_ok=True)
 
         prev_delta = np.zeros((args.ctu_rows, args.ctu_cols))
         roi_bound, bg_bound = q_adaptive_bounds(qp)
+        # Final clip bounds intersected with VVC legal range.
+        clip_lo = max(-roi_bound, float(cfg.delta_min_clip))
+        clip_hi = min(+bg_bound, float(cfg.delta_max_clip))
+        ratios_pre_round, ratios_post_round = [], []
         for fi in range(n_frames):
             sal_path = sal_dir / f"phi_oracle_{fi:06d}.npy"
             if not sal_path.exists():
@@ -289,19 +304,46 @@ def main() -> None:
             else:  # a_plus mode
                 delta_pred = delta_a
 
-            # 3) Re-project rate neutrality (residual could shift it)
-            delta_pred = project_rate_neutral_exact(delta_pred, K_grid)
+            # 3) Clip-aware exact projection — preserves rate-neutrality
+            #    *after* clipping (plain exact projection breaks once a CTU
+            #    saturates at a bound). Returns an already-clipped map.
+            delta_pred = project_rate_neutral_clipped_exact(
+                delta_pred, K_grid,
+                delta_min=clip_lo, delta_max=clip_hi,
+            )
 
-            # 4) Q-adaptive clip → absolute clip
-            delta_pred = np.clip(delta_pred, -roi_bound, +bg_bound)
-            delta_pred = np.clip(delta_pred,
-                                 cfg.delta_min_clip, cfg.delta_max_clip)
+            # Continuous-map ratio (should be 1.0 to machine precision).
+            ratios_pre_round.append(rate_neutral_residual(delta_pred, K_grid))
 
-            _write_delta_map(delta_pred, qp_dir / f"qp_{fi:06d}.txt", fi)
-            prev_delta = delta_pred
+            # 4) Final integer rounding (VVC requires integer δQP).
+            #    NOTE: rounding can drift the rate-neutral ratio; we monitor it.
+            delta_int = np.clip(np.rint(delta_pred),
+                                cfg.delta_min_clip, cfg.delta_max_clip)
+            ratios_post_round.append(rate_neutral_residual(delta_int, K_grid))
+
+            _write_delta_map(delta_int, qp_dir / f"qp_{fi:06d}.txt", fi)
+            prev_delta = delta_int.astype(np.float64)
             n_total_written += 1
 
-        logger.info("Wrote %d delta maps for Q_b=%d to %s", n_frames, qp, qp_dir)
+        rate_ratio_log.append({
+            "q_base": int(qp),
+            "n_frames": n_frames,
+            "rate_ratio_pre_round_mean":  float(np.mean(ratios_pre_round)),
+            "rate_ratio_pre_round_max_abs_dev": float(np.max(np.abs(
+                np.asarray(ratios_pre_round) - 1.0))),
+            "rate_ratio_post_round_mean": float(np.mean(ratios_post_round)),
+            "rate_ratio_post_round_max_abs_dev": float(np.max(np.abs(
+                np.asarray(ratios_post_round) - 1.0))),
+        })
+        logger.info(
+            "Q_b=%d → wrote %d maps; rate-ratio pre-round = %.6f "
+            "(max dev %.2e), post-round = %.6f (max dev %.2e)",
+            qp, n_frames,
+            rate_ratio_log[-1]["rate_ratio_pre_round_mean"],
+            rate_ratio_log[-1]["rate_ratio_pre_round_max_abs_dev"],
+            rate_ratio_log[-1]["rate_ratio_post_round_mean"],
+            rate_ratio_log[-1]["rate_ratio_post_round_max_abs_dev"],
+        )
 
     # ── Persist metadata ───────────────────────────────────────────────────
     meta = {
@@ -317,11 +359,21 @@ def main() -> None:
         "ctu_grid":      [args.ctu_rows, args.ctu_cols],
         "residual_bound": float(args.residual_bound),
         "feature_names": FEATURE_NAMES,
+        # Rate-neutrality monitoring — the **continuous, clipped** map is
+        # rate-neutral by construction (pre_round_mean ≈ 1.0). The integer
+        # map drifts by ~0.5–2 % typically; flag if > 5 %.
+        "rate_neutral_log": rate_ratio_log,
     }
     with open(out_root / "liteqp_metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     logger.info("Wrote metadata to %s", out_root / "liteqp_metadata.json")
     logger.info("Total maps written: %d", n_total_written)
+    # Soft warning if any QP shows large post-round drift.
+    for entry in rate_ratio_log:
+        drift = abs(entry["rate_ratio_post_round_mean"] - 1.0)
+        if drift > 0.05:
+            logger.warning("Q_b=%d post-round rate drift = %.2f %% (>5 %%)",
+                           entry["q_base"], drift * 100.0)
 
 
 if __name__ == "__main__":

@@ -152,6 +152,8 @@ def step_train(cfg, dataset_path: Path, out_root: Path) -> Path:
         "--residual-bound", str(cfg.get("residual_bound", 2.0)),
         "--max-iter", str(train_cfg.get("max_iter", 400)),
         "--cv", train_cfg.get("cv", "both"),
+        "--n-bootstrap", str(train_cfg.get("n_bootstrap", 500)),
+        "--bootstrap-alpha", str(train_cfg.get("bootstrap_alpha", 0.05)),
     ]
     run(cmd, "train_liteqp")
     return model_path

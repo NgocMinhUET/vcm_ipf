@@ -150,7 +150,10 @@ def compute_a_plus_delta(
     # (2) per-CTU score combining task importance and rate complexity.
     xi = (phi + cfg.eps) / np.power(K_norm + cfg.kappa, cfg.beta)
 
-    # (3) K-weighted geometric centre — preserves rate neutrality on log-scale.
+    # (3) K-weighted arithmetic normalisation factor — chosen so that
+    #     ``-6·log_2(ξ_c / g)`` has zero K-weighted mean **on the log-rate
+    #     scale**, i.e. Σ K · 2^{-δ_c/6} ≈ Σ K to first order. This is NOT a
+    #     geometric mean; it is the arithmetic K-weighted mean of ξ.
     denom = np.sum(K) + 1e-9
     g = float(np.sum(K * xi) / denom)
     g = max(g, 1e-9)
@@ -223,6 +226,77 @@ def project_rate_neutral_linear(
     K = np.asarray(K, dtype=np.float64)
     s = -float(np.sum(K * delta) / (np.sum(K) + 1e-9))
     return delta + s
+
+
+def project_rate_neutral_clipped_exact(
+    delta: np.ndarray,
+    K: np.ndarray,
+    delta_min: float,
+    delta_max: float,
+    n_iter: int = 60,
+    tol: float = 1e-9,
+) -> np.ndarray:
+    """Rate-neutral projection that **respects per-CTU clipping bounds**.
+
+    The plain :func:`project_rate_neutral_exact` finds a global shift ``s``
+    that makes ``Σ K · 2^{-(δ+s)/6} = Σ K``. However, in our pipeline we then
+    clip the shifted map into ``[delta_min, delta_max]``, which can break
+    the equality (some CTUs saturate at the bound and stop "absorbing" the
+    shift).
+
+    This function instead solves
+
+        find s such that  Σ K · 2^{-clip(δ+s, [δ_min, δ_max])/6}  =  Σ K
+
+    by 1-D bisection. The function ``s ↦ Σ K · 2^{-clip(δ+s,…)/6}`` is
+    monotonically *decreasing* in ``s`` (more shift ⇒ higher post-shift δ ⇒
+    fewer bits), so bisection always converges.
+
+    Returns the **clipped** delta map.
+    """
+    delta = np.asarray(delta, dtype=np.float64)
+    K = np.asarray(K, dtype=np.float64)
+    target = float(np.sum(K))
+    if target <= 0:
+        return np.clip(delta, delta_min, delta_max)
+
+    def rate_sum(s: float) -> float:
+        d = np.clip(delta + s, delta_min, delta_max)
+        return float(np.sum(K * np.power(2.0, -d / 6.0)))
+
+    # Wide bracket — well outside any reasonable QP shift in [-30, +30].
+    lo, hi = -30.0, +30.0
+    f_lo = rate_sum(lo)   # large (δ very negative ⇒ many bits)
+    f_hi = rate_sum(hi)   # small
+    # If the target is unreachable even at the extremes, return best-effort.
+    if not (f_hi <= target <= f_lo):
+        # Pick the bracket end closest to the target.
+        return np.clip(delta + (lo if abs(f_lo - target) < abs(f_hi - target)
+                                else hi), delta_min, delta_max)
+
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        if rate_sum(mid) > target:
+            lo = mid
+        else:
+            hi = mid
+        if (hi - lo) < tol:
+            break
+
+    s = 0.5 * (lo + hi)
+    return np.clip(delta + s, delta_min, delta_max)
+
+
+def rate_neutral_residual(delta: np.ndarray, K: np.ndarray) -> float:
+    """Return ``Σ K · 2^{-δ/6} / Σ K``. = 1.0 means perfectly rate-neutral.
+
+    Use this to **monitor** how much the integer-rounding step in
+    :func:`apply_liteqp_model.main` deviates from the continuous projection.
+    """
+    delta = np.asarray(delta, dtype=np.float64)
+    K = np.asarray(K, dtype=np.float64)
+    denom = float(np.sum(K) + 1e-9)
+    return float(np.sum(K * np.power(2.0, -delta / 6.0)) / denom)
 
 
 # ---------------------------------------------------------------------------
