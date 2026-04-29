@@ -135,8 +135,8 @@ class EncodingPipeline:
             run_id=run_id,
         )
 
-        # --- Step 1: Locate QP maps ---
-        qp_map_dir = self._find_qp_maps(seq_cfg.name, method)
+        # --- Step 1: Locate QP maps (Q_base-aware: prefers per-QP variants) ---
+        qp_map_dir = self._find_qp_maps(seq_cfg.name, method, qp_base)
 
         # --- Step 2: Encode ---
         bs_path = run_dir / "bitstream.bin"
@@ -321,18 +321,22 @@ class EncodingPipeline:
         )
         return boxes
 
-    def _find_qp_maps(self, seq_name: str, method: str) -> Optional[str]:
-        """Locate Phase 1 QP maps for a given sequence and method.
+    def _find_qp_maps(self, seq_name: str, method: str,
+                      qp_base: Optional[int] = None) -> Optional[str]:
+        """Locate Phase 1 / Phase 3 QP maps for a (sequence, method, Q_base).
 
         For M0 (uniform QP), no external QP maps are needed.
 
-        Search order (Phase 3 preferred → legacy):
-            1. ``<run_dir>/qp_vtm_delta/`` — Q_base-agnostic DELTA maps
-               (composed with Q_base by VTMEncoder at encode time).
-            2. ``<run_dir>/qp_vtm/`` — legacy ABSOLUTE maps (pilot v1).
+        Search order (most specific → most generic):
+            1. ``<run_dir>/qp_vtm_delta_QP{Q_base}/`` — per-QP DELTA maps
+               (used by Phase 3 LiteQP / A+, where Q-adaptive bounds make
+               the optimal δQP map depend on Q_base).
+            2. ``<run_dir>/qp_vtm_delta/`` — Q_base-agnostic DELTA maps
+               (used by pilot_v3 oracle-direct).
+            3. ``<run_dir>/qp_vtm/`` — legacy ABSOLUTE maps (pilot v1).
 
         The encoder wrapper auto-detects the format from the file header
-        and composes deltas with Q_base on-the-fly.
+        and composes deltas with Q_base on-the-fly when needed.
         """
         if method == "M0":
             return None
@@ -341,18 +345,25 @@ class EncodingPipeline:
         prefix = self.cfg.encoding.phase1_run_prefix
         base = phase1_dir / f"{prefix}{seq_name}" / method
 
-        # Phase 3: delta maps take precedence when present.
+        # 1) Per-QP delta directory (preferred for Q-adaptive Phase 3 methods).
+        if qp_base is not None:
+            per_qp_dir = base / f"qp_vtm_delta_QP{qp_base}"
+            if per_qp_dir.is_dir() and any(per_qp_dir.glob("qp_*.txt")):
+                return str(per_qp_dir)
+
+        # 2) Generic delta directory.
         delta_dir = base / "qp_vtm_delta"
         if delta_dir.is_dir() and any(delta_dir.glob("qp_*.txt")):
             return str(delta_dir)
 
-        # Legacy: absolute-QP maps.
+        # 3) Legacy absolute-QP maps.
         abs_dir = base / "qp_vtm"
         if abs_dir.is_dir() and any(abs_dir.glob("qp_*.txt")):
             return str(abs_dir)
 
         logger.warning(
-            "QP maps not found for %s/%s under %s", seq_name, method, base
+            "QP maps not found for %s/%s/QP%s under %s",
+            seq_name, method, qp_base, base,
         )
         return None
 

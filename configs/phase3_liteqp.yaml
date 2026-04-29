@@ -1,0 +1,75 @@
+# =============================================================================
+# Phase 3 Stage C — LiteQP residual training pipeline config
+# =============================================================================
+# Drives `phase2/scripts/run_phase3_liteqp_pipeline.py`.
+#
+# Stages:
+#   1. occlusion_saliency      → ~/Minh/ipf/phase3_outputs/saliency/<seq>/
+#   2. rate_surrogate          → ~/Minh/ipf/phase3_outputs/rate/<seq>/rate_surrogate.npz
+#   3. build_liteqp_dataset    → ~/Minh/ipf/phase3_outputs/oracle_liteqp/<seq>.jsonl
+#   4. concat                  → all_liteqp.jsonl
+#   5. train_liteqp_regressor  → ~/Minh/ipf/phase3_outputs/fit/liteqp_mlp.joblib  (LOSO)
+#   6. apply_liteqp_model      → ~/Minh/ipf/phase3_outputs/learned/liteqp_<seq>/M4/qp_vtm_delta_QP{n}/
+#
+# After this pipeline completes, encode with `phase2/configs/pilot_v4.yaml`.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+# pilot_v1 supplies the per-frame M0 bits used to calibrate the rate surrogate.
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0     # cap on |δ_star − δ_a+| AND on the MLP output
+
+# ── Sequences ────────────────────────────────────────────────────────────────
+# Must be a subset of {MOT17-02,04,09}-DPM (the sequences that already have
+# pilot_v1 M0 encodes for rate-surrogate calibration).
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+# ── Step 1 — occlusion saliency hyper-parameters ─────────────────────────────
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian for δ_star labels ────────────────────────────
+teacher:
+  lambda_task: 5.0       # per-CTU surrogate scale (NOT per-frame; see project notes)
+  lambda_anchor: 0.6     # Tikhonov weight pulling δ_star toward δ_a+
+  eta: 0.06              # asymmetric task gain (mAP units per QP step)
+  xi: 0.15               # diminishing return for δ < 0
+
+# ── Step 5 — MLP training ────────────────────────────────────────────────────
+train:
+  cv: "both"             # "loso" | "none" | "both"  (always run LOSO + full-fit)
+  max_iter: 400
+  seed: 20260429
+
+# ── Step 6 — apply to generate dQP maps ──────────────────────────────────────
+apply:
+  mode: "liteqp"         # "liteqp" (A+ + MLP residual) or "a_plus" (A+ only)

@@ -1,0 +1,80 @@
+# =============================================================================
+# Phase 2 Pilot v4 — LiteQP (analytic A+ prior + lightweight residual MLP)
+# =============================================================================
+# Compares M0 (uniform anchor) against M4 = LiteQP (RD-log A+ + small MLP
+# residual correction, rate-neutral projected, Q-adaptive clipped).
+#
+# Pre-requisite directory layout (must already exist on the server):
+#   ~/Minh/ipf/phase3_outputs/learned/liteqp_<seq>/M4/qp_vtm_delta_QP{27,32,37,42}/
+#
+# These per-QP delta directories are produced by:
+#   1. python -m phase2.phase3.occlusion_saliency      (per sequence)
+#   2. python -m phase2.phase3.rate_surrogate          (per sequence)
+#   3. python -m phase2.phase3.build_liteqp_dataset    (per sequence)
+#   4. python -m phase2.phase3.train_liteqp_regressor  (joint, LOSO)
+#   5. python -m phase2.phase3.apply_liteqp_model --per-qp  (per sequence)
+#
+# Use scripts/run_phase3_pipeline.py for end-to-end orchestration.
+#
+# Grid: 3 seq × 2 methods × 4 QPs × 50 frames = 24 runs ≈ 14 h on a single GPU.
+# =============================================================================
+
+experiment_id: "pilot_v4"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  # pilot_v4 = M0 anchor + M4 LiteQP (analytic A+ + residual MLP).
+  # encode_pipeline._find_qp_maps will pick up qp_vtm_delta_QP{qp}/ per Q_base.
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
+  phase1_run_prefix: "liteqp_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
