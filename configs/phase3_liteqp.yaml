@@ -16,6 +16,12 @@
 
 output_root: "~/Minh/ipf/phase3_outputs"
 
+# Optional version suffix. When non-empty, "_<version>" is appended to:
+#   oracle_liteqp{sfx}/      fit/liteqp_mlp{sfx}.joblib      learned/liteqp{sfx}_<seq>/
+# Leave empty (or unset) to keep the historical pilot_v4 layout. Use
+# "v2", "v3", … to keep ablations from overwriting each other.
+version: ""
+
 # pilot_v1 supplies the per-frame M0 bits used to calibrate the rate surrogate.
 pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
 
@@ -63,6 +69,11 @@ teacher:
   lambda_anchor: 0.6     # Tikhonov weight pulling δ_star toward δ_a+
   eta: 0.06              # asymmetric task gain (mAP units per QP step)
   xi: 0.15               # diminishing return for δ < 0
+
+# Optional per-sequence Lagrangian overrides. Only the listed keys override
+# the global ``teacher:`` defaults; unlisted keys / unlisted sequences fall
+# through. See ``phase3_liteqp_v2.yaml`` for a worked example.
+teacher_overrides: {}
 
 # ── Step 5 — MLP training ────────────────────────────────────────────────────
 train:

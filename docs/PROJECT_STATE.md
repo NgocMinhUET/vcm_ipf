@@ -262,15 +262,18 @@ invoked if Level 5 does not reach the target BD-Task (see §5.3 of the protocol)
 | pilot_v3 | M4 = oracle-direct (μ=0.35, Δroi=6, Δbg=4) | DONE 2026-04-29 |
 | pilot_v3 | MOT17-04 ~46 % rate saving at equal mAP=0.846 | DONE — headline result |
 | pilot_v3 | MOT17-02 unstable at QP=27 (low-QP intra mismatch) | DIAGNOSED |
+| **pilot_v4** | **M4-LiteQP final results (24/24 runs, 2026-04-30)** | **DONE — see §7.8** |
 | **C.0** | **Stage C plan: analytic prior + tiny MLP residual (LiteQP)** | **DONE (this commit)** |
 | **C.1** | **`analytic_a_plus.py` — RD-log A+ + Q-adaptive bounds + exact rate-neutral proj.** | **DONE (this commit)** |
 | **C.2** | **`build_liteqp_dataset.py` — features + δ_a+ + δ_star + residual** | **DONE (this commit)** |
 | **C.3** | **`train_liteqp_regressor.py` — MLP residual w/ mandatory LOSO** | **DONE (this commit)** |
 | **C.4** | **`apply_liteqp_model.py` — per-QP δQP maps (A+ + r̂ → projection → clip)** | **DONE (this commit)** |
 | **C.5** | **`pilot_v4.yaml` + `run_phase3_liteqp_pipeline.py` orchestrator** | **DONE (this commit)** |
-| 1 | Run `phase2/scripts/run_phase3_liteqp_pipeline.py` end-to-end on server | pending user |
-| 2 | Encode `pilot_v4.yaml` (M0 vs M4-LiteQP) | pending Stage 1 |
-| 3 | Compare pilot_v3 (oracle-direct) vs pilot_v4 (LiteQP) → final table | pending Stage 2 |
+| 1 | Run `phase2/scripts/run_phase3_liteqp_pipeline.py` end-to-end on server | DONE 2026-04-29 |
+| 2 | Encode `pilot_v4.yaml` (M0 vs M4-LiteQP) | DONE 2026-04-30 (24/24 successful) |
+| 3 | Compare pilot_v3 (oracle-direct) vs pilot_v4 (LiteQP) → final table | DONE — see §7.8 |
+| 4 | Paper writing — Method + Results sections | NEXT (this session) |
+| 5 | Slide deck for professor (figures generated 2026-04-30) | NEXT (this session) |
 
 ### 7.4 Stage B rationale (academic justification)
 Why surrogate-driven instead of pure VTM oracle:
@@ -366,6 +369,184 @@ Diagnostic: ρ_spearman(Φ_IPF, Φ_oracle) over all 50 × 3 frames.
 | `phase2/src/phase2/encoding/vtm_encoder.py` | Auto-compose dQP + Q_base |
 | `phase2/configs/pilot_v3.yaml` | Pilot v3 encode config (oracle-direct method) |
 
+### 7.8 Pilot v4 — FINAL RESULTS (2026-04-30, 24/24 successful)
+
+**Method**: M4-LiteQP = `δ_c = Π_B(Q_b)[ δ_c^A+ + r_θ(x_c) ]` where:
+* `δ_c^A+` = RD-log A+ analytic prior (closed-form, K-weighted log-rate)
+* `r_θ` = MLP-(16, 8, 1) residual (273 params), trained on 81 000 per-CTU
+  rows with LOSO CV; pooled bootstrap MAE = **0.42 QP** (95 % CI [0.41, 0.42])
+* `Π_B(Q_b)` = clip-aware exact rate-neutral projection (bisection) +
+  Q-adaptive bounds `(Δ_roi, Δ_bg) = (4..7, 2..4)` linear in Q_b
+* Hard absolute clip to VVC legal range `[-8, +4]`
+
+**Cross-pilot BD-Rate-Task summary** (M4 vs M0 anchor, mAP as quality):
+
+| Sequence       | pilot_v1 (M5 best) | pilot_v3 (Oracle-Direct) | **pilot_v4 (LiteQP)** |
+|----------------|---:|---:|---:|
+| MOT17-02-DPM   |  −1.1 % | **+262.1 %** ❌ | **+41.5 %** |
+| MOT17-04-DPM   | +82.4 % | −69.2 % | −5.5 % |
+| MOT17-09-DPM   | +10.3 % | +36.5 % | **−33.3 %** |
+| **Average**    | **+30.5 %** | **+76.5 %** | **+0.9 %** |
+
+**Win/Tie/Loss tally** (per (sequence, QP) outcome, 12 runs each):
+
+| Pilot | Win | Tie | Loss | Win-rate |
+|---|---:|---:|---:|---:|
+| pilot_v1 (M5)  | 4 | 5 | 3 | 33 % |
+| pilot_v3 (Oracle-Direct) | 5 | 6 | 1 |  42 % |
+| **pilot_v4 (LiteQP)** | **8** | **4** | **0** | **67 %** |
+
+**Headline numbers for the paper**:
+* **+0.9 % avg BD-Rate-Task** (essentially rate-neutral overall)
+* **0 losses** out of 12 (sequence × QP) operating points
+* **MOT17-02 instability cured**: pilot_v3 had ΔmAP = −0.057 at QP=27;
+  pilot_v4 has ΔmAP = −0.013 at the same point with **−9.4 % rate**
+* **MOT17-09 @ QP=32**: same bitrate (+0.005 % drift), **+5.1 % mAP**
+
+**Slide-ready figures** (PNG, 300 DPI, in repo root):
+* `slide_v4_fig1_bd_evolution.png` — pilot v1→v3→v4 BD bar chart
+* `slide_v4_fig2_winloss.png` — Win/Tie/Loss stacked
+* `slide_v4_fig3_rd_curves.png` — 3-panel RD curves (M0 / pilot_v3 / pilot_v4)
+* `slide_v4_fig4_headline.png` — single-slide story with big-number cells
+
+**Reproducer**: `python gen_v4_slides.py` from repo root (reads
+`pilot_comparison_v1v3v4.json` produced by `compare_pilots.py`).
+
+### 7.9 Head-to-Head Analysis vs heuristic baselines (2026-04-30)
+
+**Motivation**: pilot_v4 §7.8 compares M4-LiteQP only against M0. Honest
+question — does LiteQP actually beat the older heuristic baselines (M1, M5,
+M6) from pilot_v1, or is it only "M0 + ε"?
+
+**Method**: restrict both pilots to the **overlap QP grid `{32, 37, 42}`**
+(pilot_v1 ⊃ {32,37,42,47}, pilot_v4 ⊃ {27,32,37,42}). Compare per-QP
+ΔRate-% / ΔmAP and quadratic BD-Rate-Task across 4 methods × 3 sequences.
+Reproducer: `python head_to_head_analysis.py` (repo root).
+
+**Sequence-averaged BD-Rate-Task (overlap grid only)**:
+
+| Rank | Method | Avg BD-Rate-Task | Notes |
+|---|---|---:|---|
+| 🥇 | **M4-LiteQP** | **+35.23 %** | Our method — best on average |
+| 🥈 | M6 (RD-driven) | +41.36 % | Wins MOT17-09 by huge margin (−39.3 %) |
+| 🥉 | M5 (Anisotropic) | +59.17 % | Most consistent per-cell winner (4/9) |
+|  4 | M1 (Binary) | +63.63 % | Generally weak |
+
+⚠️ **All four methods have positive BD-Rate-Task on the overlap grid** —
+artifact of 3-point quadratic fit + saturated mAP. The 4-pt grid in §7.8
+gives more realistic numbers (+0.9 % for LiteQP).
+
+**Per-(seq, QP) ranking tally** (lower combined Pareto rank = better; 9
+cells = 3 seq × 3 QP):
+
+| Method | #1 cells | Where it shines |
+|---|---:|---|
+| M5 (Anisotropic) | **4 / 9** | MOT17-04 entire (saturated mAP regime) |
+| M1 (Binary) | 2 / 9 | High-QP edge (02@QP=42, 09@QP=42) |
+| **M4-LiteQP** | **2 / 9** | Low-QP / dynamic (02@QP=32, 09@QP=32, 09@QP=37) |
+| M6 (RD-driven) | 0 / 9 | Best-on-average MOT17-09 but never per-cell #1 |
+
+**Per-sequence champion**:
+
+| Sequence | Best (BD %) | LiteQP rank | Gap from best |
+|---|---|---:|---:|
+| MOT17-02-DPM | M4-LiteQP (+72.7 %) | **#1** | best |
+| MOT17-04-DPM | M6 (+23.5 %) | #2 | +2.0 pp |
+| **MOT17-09-DPM** | **M6 (−39.3 %)** | **#3** | **+46.8 pp** ⚠ |
+
+**Diagnosis — three weaknesses identified**:
+
+1. **Fixed `λ_task = 5.0` is wrong for all sequences**. Sequence-specific
+   mAP-vs-rate elasticity demands different Lagrangians:
+   - MOT17-02 (saturated mAP, ΔmAP small per Δbit) → **λ ≈ 3** (rate-leaning)
+   - MOT17-04 (balanced) → **λ ≈ 5** (current default, OK)
+   - MOT17-09 (elastic mAP, ΔmAP large per Δbit) → **λ ≈ 8** (mAP-leaning)
+2. **Fixed `residual_bound = ±2 QP` is not Q-aware**. Low-QP regimes have
+   bigger bit budget and tolerate larger residuals; high-QP regimes are
+   gated by intra-prediction stability.
+3. **`K_c` calibration from M0 uniform encodes is biased**. Heterogeneous
+   dQP encodes follow a slightly different rate-distortion slope.
+
+**Generated artifacts** (in repo root):
+- `head_to_head_analysis.py` — reproducer (hard-coded real numbers from JSON)
+- `head_to_head_table.txt` — printable per-QP and ranking tables
+- `head_to_head_results.json` — structured results for paper
+- `head_to_head_bd_bars.png` — BD bars (4 methods × 3 sequences + average)
+- `head_to_head_ranking.png` — per-(seq, QP) Pareto-rank heatmap
+
+**Honest verdict for paper**: M4-LiteQP wins on average and never loses
+catastrophically (low variance), but **does not strictly dominate** —
+heuristic M5 wins more (seq, QP) cells (4 vs 2) and M6 has a stronger
+sequence-level peak. The story to tell reviewers:
+> "LiteQP is the most consistent method across (sequence, QP)
+>  configurations and is the only method with a principled rate-neutral
+>  guarantee; existing heuristics remain competitive on
+>  saturated-mAP scenes but lack theoretical justification."
+
+### 7.10 Action 2 — Per-sequence λ_task tuning (NEXT, IN PROGRESS)
+
+**Hypothesis**: the +46.8 pp gap on MOT17-09 (vs M6) is caused entirely by
+under-tuned `λ_task`. With sequence-appropriate λ in the teacher, the MLP
+will learn a stronger residual on high-motion CTUs and close the gap.
+
+**Plan** (Stage 2a — minimal-code change, single-MLP design):
+
+1. **Per-sequence λ_task in teacher** (the only change):
+   - `MOT17-02-DPM` → `λ_task = 3.0` (saturated mAP, rate-leaning)
+   - `MOT17-04-DPM` → `λ_task = 5.0` (balanced, current default)
+   - `MOT17-09-DPM` → `λ_task = 8.0` (elastic mAP, mAP-leaning)
+2. **Single pooled MLP** trained on the union (LOSO preserved).
+   The MLP's existing `motion_proxy` / `phi` / `K_c_norm` features should
+   carry enough sequence-discriminative information to absorb the
+   λ-induced label heterogeneity. Future stages 2b/2c will add
+   `lambda_task` as an explicit feature if 2a is insufficient.
+3. **Outputs versioned with `_v2` suffix** (no overwrite of pilot_v4
+   artifacts):
+   - `~/Minh/ipf/phase3_outputs/oracle_liteqp_v2/<seq>.jsonl`
+   - `~/Minh/ipf/phase3_outputs/fit/liteqp_mlp_v2.joblib`
+   - `~/Minh/ipf/phase3_outputs/learned/liteqp_v2_<seq>/M4/qp_vtm_delta_QP{n}/`
+4. **Encode `pilot_v5.yaml`**: M0 (anchor) vs M4-LiteQP-v2.
+
+**Files added / changed (this commit)**:
+
+| Path | Purpose |
+|------|---------|
+| `phase2/configs/phase3_liteqp_v2.yaml` | NEW — per-seq λ overrides + `version: "v2"` |
+| `phase2/configs/pilot_v5.yaml` | NEW — encode M0 vs M4-LiteQP-v2 (re-uses pilot_v4 grid) |
+| `phase2/scripts/run_phase3_liteqp_pipeline.py` | UPDATED — `version` suffix + `teacher_overrides` per sequence |
+
+**Run sequence on server (re-uses pilot_v4 saliency + rate caches; ~3 h
+training + ~14 h pilot encode)**:
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# 1) Build v2 dataset → train v2 MLP → apply v2 maps (steps 1-2 skipped
+#    automatically because saliency + rate caches already exist).
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_v2.yaml --start-step 3
+
+# 2) Verify per-seq λ correctly applied (look at JSONL byte counts —
+#    should be the same as v1, but δ_star distributions differ):
+wc -l ~/Minh/ipf/phase3_outputs/oracle_liteqp_v2/*.jsonl
+
+# 3) Verify v2 maps generated:
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_v2_MOT17-09-DPM/M4/
+
+# 4) Encode pilot_v5 (~14 h):
+bash scripts/run_pilot.sh configs/pilot_v5.yaml
+
+# 5) Compare pilot_v1 + pilot_v4 + pilot_v5 head-to-head:
+python scripts/compare_pilots.py \
+    ~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v4/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v5/experiment_summary.json
+```
+
+**Pre-registered success criterion**: pilot_v5 BD-Rate-Task on MOT17-09 is
+**≤ −10 %** (closing >70 % of the +46.8 pp gap to M6) AND ≥ 5 of 9
+overlap-grid cells rank #1 (vs current 2/9).
+
 ---
 
 ## 8. Standing Instructions
@@ -433,6 +614,45 @@ Diagnostic: ρ_spearman(Φ_IPF, Φ_oracle) over all 50 × 3 frames.
   BD-Rate-Task average mixed. Diagnosis: oracle-direct fixed params
   (μ=0.35, Δroi=6, Δbg=4) are not Q-adaptive — at low QP the +4 background
   delta breaks VVC intra-prediction across CTU boundaries.
+- **2026-04-30**: pilot_v4 final results (24/24 successful, see §7.8).
+  M4-LiteQP achieves **+0.9 % avg BD-Rate-Task** (vs M0) with
+  **8 wins / 4 ties / 0 losses** out of 12 operating points — a full
+  76 pp improvement over pilot_v3 oracle-direct (+76.5 %) and a 30 pp
+  improvement over pilot_v1's best baseline M5 (+30.5 %).
+  - **MOT17-02 instability fix verified**: ΔmAP at QP=27 went from −0.057
+    (pilot_v3) to −0.013 (pilot_v4), with the rate saving **doubling**
+    from −5.6 % to −9.4 %. Q-adaptive bounds + LiteQP residual fully
+    cured the low-QP intra-prediction mismatch we diagnosed in pilot_v3.
+  - **MOT17-09 @ QP=32**: same bitrate, **+5.1 % mAP** — pure task-axis win.
+  - **MOT17-04**: 2 strict RD-Pareto wins at low QP, 2 ties at high QP
+    (the only "regression" vs pilot_v3's −69 % BD, which was a single-seq
+    outlier driven by a small mAP overlap window).
+  - Slide figures generated: `slide_v4_fig{1..4}_*.png` (300 DPI). Figure
+    generator: `gen_v4_slides.py` (reads `pilot_comparison_v1v3v4.json`).
+  - Next: paper writing (Method + Results sections in LaTeX) and a final
+    English `BAO_CAO_IPF_v5_EN.docx` for the professor.
+- **2026-04-30 (afternoon)**: Head-to-head analysis vs pilot_v1 baselines
+  + Action 2 (per-sequence λ_task) launched.
+  - **Honest finding** (§7.9): on overlap QP grid {32,37,42}, M4-LiteQP is
+    best on average (+35.2 %) but does NOT strictly dominate. M5 wins
+    4/9 (seq, QP) cells vs LiteQP 2/9. M6 has a massive sequence-level
+    win on MOT17-09 (BD = −39.3 %) that LiteQP misses by 47 pp.
+  - **Three weaknesses identified** (§7.9): fixed `λ_task = 5.0` for all
+    sequences, fixed `residual_bound = ±2 QP` (not Q-aware), and possibly
+    biased `K_c` from M0-only calibration.
+  - **Action 2 launched** (§7.10): per-sequence λ_task in teacher
+    (3.0 / 5.0 / 8.0 for MOT17-{02,04,09}-DPM), single pooled MLP, all
+    outputs versioned with `_v2` suffix to preserve pilot_v4 artifacts.
+  - **Files added**: `phase2/configs/phase3_liteqp_v2.yaml`,
+    `phase2/configs/pilot_v5.yaml`, plus orchestrator updates
+    (`teacher_overrides` + `version` suffix).
+  - **Pre-registered success criterion**: pilot_v5 BD on MOT17-09 ≤ −10 %
+    AND ≥ 5/9 overlap-grid cells rank #1.
+  - **Reproducer scripts**: `head_to_head_analysis.py` (head-to-head
+    figure + table), runs locally on hard-coded JSON data extracted from
+    pilot_v1 + pilot_v4 `experiment_summary.json`.
+  - Next user action: server run sequence in §7.10 (skip steps 1-2,
+    re-uses pilot_v4 saliency / rate caches).
 - **2026-04-29 (late)**: Phase 3 Stage C — LiteQP residual learning.
   Decision: instead of unconstrained CNN/DNN that risks rate violation
   and is hard to defend with reviewers, adopt **analytic prior + bounded

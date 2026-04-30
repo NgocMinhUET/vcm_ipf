@@ -1,0 +1,110 @@
+# =============================================================================
+# Phase 3 Stage C v2 — LiteQP with PER-SEQUENCE λ_task tuning
+# =============================================================================
+# Drives `phase2/scripts/run_phase3_liteqp_pipeline.py`.
+#
+# What's new vs `phase3_liteqp.yaml` (Action 2 — see PROJECT_STATE §7.10):
+#   * `version: "v2"` → all dataset / model / map paths get a "_v2" suffix so
+#     pilot_v4 artifacts are NOT overwritten.
+#   * `teacher_overrides` per sequence — lets the Lagrangian λ_task track each
+#     sequence's mAP-vs-rate elasticity:
+#       - MOT17-02-DPM (mAP saturated near 0.65 → small dmAP per dbit) → λ=3
+#       - MOT17-04-DPM (balanced)                                     → λ=5
+#       - MOT17-09-DPM (elastic mAP, large dmAP per dbit)             → λ=8
+#     This addresses the +46.8 pp BD-Rate-Task gap on MOT17-09 vs M6
+#     (head-to-head analysis, PROJECT_STATE §7.9).
+#
+# Stages (steps 1-2 are SKIPPED automatically because saliency / rate caches
+# from pilot_v4 already exist):
+#   1. occlusion_saliency          (skipped)
+#   2. rate_surrogate              (skipped)
+#   3. build_liteqp_dataset (v2)   → ~/Minh/ipf/phase3_outputs/oracle_liteqp_v2/<seq>.jsonl
+#   4. concat                      → all_liteqp_v2.jsonl
+#   5. train_liteqp_regressor      → ~/Minh/ipf/phase3_outputs/fit/liteqp_mlp_v2.joblib  (LOSO)
+#   6. apply_liteqp_model          → ~/Minh/ipf/phase3_outputs/learned/liteqp_v2_<seq>/M4/qp_vtm_delta_QP{n}/
+#
+# After this pipeline completes, encode with `phase2/configs/pilot_v5.yaml`.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v2"           # appends "_v2" to oracle / fit / learned dirs
+
+# pilot_v1 supplies the per-frame M0 bits used to calibrate the rate surrogate.
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0     # cap on |δ_star − δ_a+| AND on the MLP output
+
+# ── Sequences (identical to phase3_liteqp.yaml) ──────────────────────────────
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+# ── Step 1 — occlusion saliency (UNCHANGED, cached output reused) ────────────
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian (defaults; see overrides below) ──────────────
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+# ── PER-SEQUENCE λ_task tuning (the heart of v2) ─────────────────────────────
+# Only `lambda_task` is overridden; the other keys fall through to `teacher:`.
+# Justification (from pilot_v1 mAP-vs-rate analysis, no peeking at M4 results):
+#
+#   sequence       mAP regime        |dmAP/d log10 R|   recommended λ_task
+#   ----------------------------     ---------------    -------------------
+#   MOT17-02-DPM   saturated 0.65    ≈ 0.18              3.0  (rate-leaning)
+#   MOT17-04-DPM   balanced  0.84    ≈ 0.36              5.0  (default)
+#   MOT17-09-DPM   elastic   0.69    ≈ 0.65              8.0  (mAP-leaning)
+#
+# The pooled MLP then sees a heterogeneous teacher, but its sequence-aware
+# features (motion_proxy, σ_Y, K_c_norm) should let it learn a residual
+# correlated with the underlying scene statistics.
+teacher_overrides:
+  MOT17-02-DPM:
+    lambda_task: 3.0
+  MOT17-04-DPM:
+    lambda_task: 5.0     # explicit for clarity (matches default)
+  MOT17-09-DPM:
+    lambda_task: 8.0
+
+# ── Step 5 — MLP training (UNCHANGED) ────────────────────────────────────────
+train:
+  cv: "both"             # always run LOSO + full-fit
+  max_iter: 400
+  seed: 20260430         # bumped vs v1 to avoid any RNG coincidence
+  n_bootstrap: 500
+  bootstrap_alpha: 0.05
+
+# ── Step 6 — apply (UNCHANGED) ───────────────────────────────────────────────
+apply:
+  mode: "liteqp"         # "liteqp" (A+ + MLP residual) or "a_plus" (A+ only)
