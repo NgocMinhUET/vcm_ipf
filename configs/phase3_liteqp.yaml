@@ -75,6 +75,21 @@ teacher:
 # through. See ``phase3_liteqp_v2.yaml`` for a worked example.
 teacher_overrides: {}
 
+# ── Action 4 — automatic per-sequence λ_task from M0 anchor elasticity ───────
+# When ``enabled: true`` the orchestrator runs ``phase2.phase3.auto_lambda``
+# at start-up, derives one ``lambda_task`` per sequence from the supplied
+# pilot M0 (rate, mAP) curve, and OVERWRITES any ``teacher_overrides``
+# entry for ``lambda_task``. This eliminates the v5 manual cherry-picking
+# critique. See ``phase3_liteqp_v3.yaml`` for a worked example.
+auto_lambda:
+  enabled: false
+  source:        ""        # path to a pilot experiment_summary.json
+  base_lambda:   5.0
+  alpha:         0.5       # square-root → damps outlier slopes (key vs v5)
+  lambda_min:    3.5
+  lambda_max:    7.0       # CAP: prevents v5's λ=8 over-shoot
+  slope_mode:    "median"  # robust to a single outlier QP arc
+
 # ── Step 5 — MLP training ────────────────────────────────────────────────────
 train:
   cv: "both"             # "loso" | "none" | "both"  (always run LOSO + full-fit)
@@ -86,3 +101,12 @@ train:
 # ── Step 6 — apply to generate dQP maps ──────────────────────────────────────
 apply:
   mode: "liteqp"         # "liteqp" (A+ + MLP residual) or "a_plus" (A+ only)
+
+  # Action 3 (Q-aware residual_bound). OPT-IN — left disabled in v3 / pilot_v6
+  # so that any change attributed cleanly to auto-λ. Flip ``enabled: true``
+  # later to combine Action 3 + 4 (would target a future pilot_v7).
+  q_aware_bound:
+    enabled: false
+    slope: 0.04          # bound(Q) = clip(2.0 − slope·(Q−32), lo, hi)
+    lo:    1.4
+    hi:    2.2

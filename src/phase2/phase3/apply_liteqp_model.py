@@ -56,6 +56,36 @@ logger = logging.getLogger("phase2.phase3.apply_liteqp_model")
 
 
 # ---------------------------------------------------------------------------
+# Action 3 — Q-aware residual_bound (OPT-IN, default OFF)
+# ---------------------------------------------------------------------------
+
+def q_aware_residual_bound(qp: int, base: float = 2.0,
+                            slope: float = 0.04,
+                            lo: float = 1.4, hi: float = 2.2) -> float:
+    """Residual bound that tightens linearly with Q_base around Q=32.
+
+    Motivation (PROJECT_STATE §7.10/7.12 verdict): high-QP encodes are
+    near the intra-prediction stability cliff — large MLP residuals there
+    can collapse mAP. Low-QP encodes have spare bit budget and tolerate
+    bigger swings.
+
+    Schedule (default ``slope=0.04``, gentle — chosen so MOT17-09's
+    +0.102 mAP gain at QP=42 from pilot_v5 can still be reproduced under
+    the bound):
+
+        bound(Q) = clip(base − slope · (Q − 32),  lo,  hi)
+
+        QP=27 → 2.20    QP=32 → 2.00    QP=37 → 1.80    QP=42 → 1.60
+
+    NOTE: this code path is GATED behind ``--q-aware-bound`` and stays
+    disabled in pilot_v6 (the v3 / Action-4 pilot) so we can attribute
+    any change in BD-Rate-Task purely to auto-λ. It is wired here so a
+    later pilot_v7 (Action 3 + 4) is a one-line config flip.
+    """
+    return float(min(max(base - slope * (qp - 32.0), lo), hi))
+
+
+# ---------------------------------------------------------------------------
 # Helpers (kept consistent with build_liteqp_dataset.py)
 # ---------------------------------------------------------------------------
 
@@ -159,7 +189,23 @@ def main() -> None:
     parser.add_argument("--n-frames", type=int, default=50)
     parser.add_argument("--ctu-rows", type=int, default=9)
     parser.add_argument("--ctu-cols", type=int, default=15)
-    parser.add_argument("--residual-bound", type=float, default=2.0)
+    parser.add_argument("--residual-bound", type=float, default=2.0,
+                        help="Constant cap on |MLP residual|. Used unless "
+                             "--q-aware-bound is set, in which case this is "
+                             "the *base* bound passed to q_aware_residual_bound().")
+    parser.add_argument("--q-aware-bound", action="store_true",
+                        help="(Action 3, OPT-IN). Make the residual bound a "
+                             "function of Q_base via q_aware_residual_bound() — "
+                             "tighter at high QP where the MLP can over-shoot. "
+                             "Default OFF for clean comparison vs constant-bound "
+                             "models (e.g. pilot_v4).")
+    parser.add_argument("--q-aware-slope", type=float, default=0.04,
+                        help="Slope per QP step around Q=32 when --q-aware-bound "
+                             "is set. Default 0.04 (gentle: ±2.0 → ±1.6 at QP=42).")
+    parser.add_argument("--q-aware-min", type=float, default=1.4,
+                        help="Floor for q_aware_residual_bound. Default 1.4.")
+    parser.add_argument("--q-aware-max", type=float, default=2.2,
+                        help="Ceiling for q_aware_residual_bound. Default 2.2.")
     parser.add_argument("--per-qp", action="store_true",
                         help="Write a separate qp_vtm_delta_QP<n>/ per QP. If "
                              "absent, writes only one map (assumes Q_b=32).")
@@ -246,12 +292,30 @@ def main() -> None:
     qp_iter = args.qp_list
     n_total_written = 0
     rate_ratio_log: list[dict] = []  # populated below for metadata.json
+    if args.q_aware_bound:
+        logger.info("Q-AWARE RESIDUAL BOUND enabled "
+                    "(base=%.2f, slope=%.2f, clip [%.2f, %.2f]):",
+                    args.residual_bound, args.q_aware_slope,
+                    args.q_aware_min, args.q_aware_max)
+        for q in qp_iter:
+            b = q_aware_residual_bound(q, base=args.residual_bound,
+                                          slope=args.q_aware_slope,
+                                          lo=args.q_aware_min,
+                                          hi=args.q_aware_max)
+            logger.info("  QP=%d → residual bound = ±%.2f", q, b)
     for qp in qp_iter:
         qp_dir = out_root / f"qp_vtm_delta_QP{qp}"
         qp_dir.mkdir(parents=True, exist_ok=True)
 
         prev_delta = np.zeros((args.ctu_rows, args.ctu_cols))
         roi_bound, bg_bound = q_adaptive_bounds(qp)
+        # Action 3 (opt-in): per-Q residual cap.
+        if args.q_aware_bound:
+            residual_cap = q_aware_residual_bound(
+                qp, base=args.residual_bound, slope=args.q_aware_slope,
+                lo=args.q_aware_min, hi=args.q_aware_max)
+        else:
+            residual_cap = float(args.residual_bound)
         # Final clip bounds intersected with VVC legal range.
         clip_lo = max(-roi_bound, float(cfg.delta_min_clip))
         clip_hi = min(+bg_bound, float(cfg.delta_max_clip))
@@ -298,7 +362,7 @@ def main() -> None:
                         }))
                 X = np.asarray(feats, dtype=np.float32)
                 r_hat = pipeline.predict(X)
-                r_hat = np.clip(r_hat, -args.residual_bound, +args.residual_bound)
+                r_hat = np.clip(r_hat, -residual_cap, +residual_cap)
                 r_hat = r_hat.reshape(args.ctu_rows, args.ctu_cols)
                 delta_pred = delta_a + r_hat
             else:  # a_plus mode
@@ -328,6 +392,7 @@ def main() -> None:
         rate_ratio_log.append({
             "q_base": int(qp),
             "n_frames": n_frames,
+            "residual_cap": float(residual_cap),
             "rate_ratio_pre_round_mean":  float(np.mean(ratios_pre_round)),
             "rate_ratio_pre_round_max_abs_dev": float(np.max(np.abs(
                 np.asarray(ratios_pre_round) - 1.0))),
@@ -358,6 +423,13 @@ def main() -> None:
         "n_frames":      n_frames,
         "ctu_grid":      [args.ctu_rows, args.ctu_cols],
         "residual_bound": float(args.residual_bound),
+        "q_aware_bound": {
+            "enabled":       bool(args.q_aware_bound),
+            "base":          float(args.residual_bound),
+            "slope":         float(args.q_aware_slope),
+            "lo":            float(args.q_aware_min),
+            "hi":            float(args.q_aware_max),
+        },
         "feature_names": FEATURE_NAMES,
         # Rate-neutrality monitoring — the **continuous, clipped** map is
         # rate-neutral by construction (pre_round_mean ≈ 1.0). The integer

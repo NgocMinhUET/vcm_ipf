@@ -1,0 +1,117 @@
+# =============================================================================
+# Phase 3 Stage C v3 — LiteQP with AUTOMATIC λ_task from M0 elasticity
+# =============================================================================
+# Action 4 (PROJECT_STATE §7.12): replaces v5's manual per-sequence λ tuning
+# with a closed-form data-driven estimator. λ is computed once at orchestrator
+# start-up by `phase2.phase3.auto_lambda` from the pilot v1 M0 curve and is
+# the SOLE source of `teacher_overrides[seq][lambda_task]`.
+#
+# Why v3 not v6? "v3" indexes the LITEQP TEACHER variant (v1=fixed λ=5,
+# v2=manual per-seq λ, v3=auto λ). The encoded pilot is `pilot_v6.yaml`.
+#
+# What's new vs `phase3_liteqp_v2.yaml`:
+#   * `auto_lambda.enabled: true`          (no manual `teacher_overrides`)
+#   * `version: "v3"`                       → outputs go to `_v3` directories
+#   * Action 3 (Q-aware residual_bound) explicitly LEFT OFF for clean
+#     attribution (any Δ vs pilot_v4 must be due to auto-λ alone).
+#
+# Pre-flight sanity (the orchestrator computes these automatically and
+# persists them to `<out_root>/auto_lambda_v3.json`; numbers below are
+# expected from the pilot v1 M0 anchor — see `_quick_lambda_estimate.py`):
+#
+#   sequence       elasticity     auto-λ    cf. v5 manual
+#   ----------------------------------------------------------------
+#   MOT17-02-DPM      0.258        7.00       3.0  (v5 was wrong)
+#   MOT17-04-DPM      0.094        4.58       5.0  (close)
+#   MOT17-09-DPM      0.113        5.00       8.0  (v5 was too high)
+#
+# Stages: identical to v2 — steps 1-2 (saliency + rate cache) reuse pilot_v4
+# outputs; only steps 3-6 are re-run with the new teacher.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v3"           # appends "_v3" to oracle / fit / learned dirs
+
+# pilot_v1 supplies the per-frame M0 bits used to calibrate the rate surrogate
+# AND the M0 mAP curve consumed by auto_lambda below.
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0     # cap on |δ_star − δ_a+| AND on the MLP output
+
+# ── Sequences (identical to v1/v2) ───────────────────────────────────────────
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+# ── Step 1 — occlusion saliency (UNCHANGED, cached output reused) ────────────
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian (defaults; per-seq λ comes from auto_lambda) ─
+teacher:
+  lambda_task: 5.0       # default fallback if a sequence is absent from anchor
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+# DELIBERATELY EMPTY: any manual entry here for `lambda_task` would be
+# OVERWRITTEN by auto_lambda below (the orchestrator enforces this). Other
+# keys (lambda_anchor / eta / xi) may still be set per-sequence here.
+teacher_overrides: {}
+
+# ── Action 4 — automatic per-sequence λ_task from M0 elasticity ──────────────
+auto_lambda:
+  enabled:     true
+  source:      "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+  base_lambda: 5.0
+  alpha:       0.5         # sqrt: damps outlier slopes (PROJECT_STATE §7.12)
+  lambda_min:  3.5
+  lambda_max:  7.0         # CAP: prevents v5 λ=8 over-shoot (key safety)
+  slope_mode:  "median"    # robust to one bad QP arc
+
+# ── Step 5 — MLP training (UNCHANGED) ────────────────────────────────────────
+train:
+  cv: "both"               # always run LOSO + full-fit
+  max_iter: 400
+  seed: 20260501           # bumped vs v1/v2 — distinct RNG state
+  n_bootstrap: 500
+  bootstrap_alpha: 0.05
+
+# ── Step 6 — apply (Action 3 EXPLICITLY OFF for clean attribution) ───────────
+apply:
+  mode: "liteqp"           # "liteqp" (A+ + MLP residual) or "a_plus" (A+ only)
+
+  # Action 3 — DISABLED in v3. Enable in a future pilot_v7 to combine Action
+  # 3 + 4 (only after pilot_v6 results are in, so the cause of any change is
+  # unambiguously attributed).
+  q_aware_bound:
+    enabled: false
+    slope: 0.04
+    lo:    1.4
+    hi:    2.2

@@ -547,6 +547,176 @@ python scripts/compare_pilots.py \
 **≤ −10 %** (closing >70 % of the +46.8 pp gap to M6) AND ≥ 5 of 9
 overlap-grid cells rank #1 (vs current 2/9).
 
+### 7.11 Pilot v5 — RESULTS (2026-05-01, 24/24 successful) — BOTH CRITERIA FAILED
+
+**Outcome**: pre-registered criteria from §7.10 failed. The per-seq λ
+tuning produced one spectacular per-cell win (MOT17-09 @ QP=42, **+0.102
+mAP** at lower rate, +0.058 better than pilot_v4) but **regressed average
+BD-Rate-Task by +18.75 percentage points** vs pilot_v4.
+
+| Sequence | pilot_v4 BD (fixed λ=5) | pilot_v5 BD (per-seq λ) | Δ |
+|---|---:|---:|---:|
+| MOT17-02-DPM (λ=3) | −7.82 % | **+22.24 %** | +30.06 pp ❌ |
+| MOT17-04-DPM (λ=5) | −4.28 % | −4.53 % | −0.25 pp ≈ |
+| MOT17-09-DPM (λ=8) | −13.72 % | **+12.71 %** | +26.43 pp ❌ |
+| **Average** | **−8.60 %** ✓ | **+10.14 %** ❌ | **+18.75 pp** |
+
+(BD-Rate-Task computed with monotone PCHIP on log-rate; raw cubic polyfit
+exploded for MOT17-02 because v5 produced a non-monotonic mAP curve at
+QP=37 — fixed in `analyze_pilot_v5.py`.)
+
+**Pre-registered criteria**:
+
+| # | Criterion | Got | Verdict |
+|---|---|---|---|
+| 1 | MOT17-09 BD ≤ −10 % | **+12.71 %** | ❌ FAIL by 23 pp |
+| 2 | M4-LiteQP-v2 wins ≥ 5/9 overlap cells | **4/9** (5/9 with generous tie-breaking) | ❌ FAIL by 1 cell |
+
+**Diagnosis**:
+
+1. **λ=8 for MOT17-09 was over-aggressive**. Bits got pushed to QP=42
+   (gain +0.058 vs v4) but at the cost of losing the **+0.05 mAP gain
+   that v4 had at QP=32** (now only +0.001). BD metric punishes the
+   tradeoff because M0's high mAP at QP=27 (0.797) is not matched.
+2. **λ=3 for MOT17-02 was rate-leaning by mistake**. The "saturated mAP"
+   intuition was wrong — MOT17-02 mAP varies 0.40–0.74 across QPs, so it
+   is **highly elastic**, not saturated. ΔmAP@QP=27 went from −0.013
+   (v4) to **−0.025 (v5)** — twice as bad.
+3. **BD-Rate-Task is biased toward methods with WIDE mAP improvements**.
+   pilot_v4 had moderate gains across the whole curve; pilot_v5 has one
+   tall narrow gain. BD does not reward height-only.
+
+**Crucial lesson** (motivating Action 4 below):
+
+> Manual per-sequence λ tuning is fragile **even when guided by
+> "principled" mAP-vs-rate analysis** (§7.10). The intuition "MOT17-02
+> is saturated → low λ" was wrong because we conflated *high mAP* with
+> *low task elasticity*. The data-driven elasticity formula immediately
+> reveals the opposite (see §7.12 numerics).
+
+**Generated artifacts** (in repo root):
+- `analyze_pilot_v5.py` — per-QP table, BD via PCHIP, head-to-head, success
+  criterion check.
+- `pilot_v5_table.txt` / `pilot_v5_results.json`
+- `pilot_v5_fig{1,2,3}_*.png` — Δ change v4→v5, head-to-head bars, ranking
+  heatmap.
+
+### 7.12 Action 4 — automatic per-sequence λ_task from M0 elasticity (NEXT)
+
+**Pivot**: pilot_v4 is the new BASELINE. Pilot_v5 is **abandoned**. We do
+NOT manually tune λ any more. Action 4 replaces v5's per-seq table with
+a one-shot, closed-form, data-driven estimator.
+
+**Formula** (from rate–task Lagrangian theory):
+
+```
+e_s   = median_i  | (mAP_{i+1} − mAP_i) / (log10 R_{i+1} − log10 R_i) |
+λ_s   = base_λ · ( e_s / median_s e_s )^α    clipped to [λ_min, λ_max]
+```
+
+The square-root saturation (`α = 0.5`) prevents one outlier slope from
+blowing up λ — this is the explicit safety guard learnt from v5.
+Clip `[3.5, 7.0]` caps λ below v5's failed value of 8.0.
+
+**Numerical preview** (from `_quick_lambda_estimate.py`, real pilot_v1
+M0 anchor):
+
+| Sequence | Per-arc \|d mAP / d log10 R\| | median e | **auto-λ** | v5 manual | Δ |
+|---|---|---:|---:|---:|---:|
+| MOT17-02-DPM | [0.044, 0.386, 0.258] | 0.258 | **7.00** (clipped) | 3.0 | **+4.0** |
+| MOT17-04-DPM | [0.094, 0.070, 0.639] | 0.094 | 4.58 | 5.0 | −0.42 |
+| MOT17-09-DPM | [0.099, 0.485, 0.113] | 0.113 | 5.00 | 8.0 | **−3.0** |
+
+The median elasticity across sequences is **0.113**.
+
+**Auto-λ is OPPOSITE to v5 manual on the two failure cases**: it would
+have set λ=7 for MOT17-02 (we had 3) and λ=5 for MOT17-09 (we had 8).
+This *itself* is strong evidence that auto-λ is correctly capturing
+elasticity, because pilot_v5 results show v5's manual choices were the
+two that produced the worst regressions.
+
+**Defensibility (reviewer-facing)**:
+
+> "We do not tune λ per sequence manually. Instead, λ is estimated
+> automatically from the anchor rate–accuracy curve, using the local
+> task elasticity with respect to bitrate (Bjontegaard-style slope).
+> A single global hyperparameter (`base_λ`) and the clip bounds
+> (`[λ_min, λ_max]`, fixed once) govern the whole hierarchy — there
+> are no per-sequence knobs."
+
+**Files added / changed (this commit)**:
+
+| Path | Purpose |
+|------|---------|
+| `phase2/src/phase2/phase3/auto_lambda.py` | NEW — closed-form per-seq λ from M0 elasticity, with CLI for previews |
+| `phase2/src/phase2/phase3/apply_liteqp_model.py` | UPDATED — adds **opt-in** `--q-aware-bound` flag (Action 3 code path; default OFF for clean attribution) |
+| `phase2/scripts/run_phase3_liteqp_pipeline.py` | UPDATED — `resolve_auto_lambda()` runs at start-up; `step_apply` propagates `q_aware_bound` config |
+| `phase2/scripts/sanity_check_phase3_v3.py` | NEW — verifies auto-λ numerics + orchestrator wiring + Q-aware bound spec + path computation (PASSED locally on real pilot_v1 anchor) |
+| `phase2/configs/phase3_liteqp.yaml` | UPDATED — documents new `auto_lambda:` and `apply.q_aware_bound:` blocks (both default-disabled) |
+| `phase2/configs/phase3_liteqp_v3.yaml` | NEW — `version: "v3"`, `auto_lambda.enabled: true`, **Action 3 explicitly OFF** for clean attribution |
+| `phase2/configs/pilot_v6.yaml` | NEW — encode M0 vs M4-LiteQP-v3, `phase1_run_prefix: "liteqp_v3_"` |
+
+**Why Action 3 is wired but DISABLED in v3**:
+
+Per the user's design constraint (PROJECT_STATE history 2026-05-01):
+combining Actions 3 + 4 in the same pilot would make any change in
+BD-Rate-Task ambiguous (auto-λ vs Q-aware bound). The Q-aware code path
+is in place so a future `pilot_v7.yaml` is a one-line config flip
+(`apply.q_aware_bound.enabled: true`), but pilot_v6 isolates Action 4.
+
+**Run sequence on server** (re-uses pilot_v4 saliency + rate caches; ~2 h
+training + ~14 h pilot encode):
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# (Optional) CLI preview of the auto-λ values that v6 will use:
+PYTHONPATH=src python -m phase2.phase3.auto_lambda \
+    --pilot-summary ~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json \
+    --sequences MOT17-02-DPM MOT17-04-DPM MOT17-09-DPM \
+    --base-lambda 5.0 --alpha 0.5 --lambda-min 3.5 --lambda-max 7.0
+# Expect: MOT17-02 = 7.00 (CLIPPED), MOT17-04 ≈ 4.58, MOT17-09 = 5.00.
+
+# 1) Build v3 dataset → train v3 MLP → apply v3 maps  (steps 1-2 auto-skip)
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_v3.yaml --start-step 3
+
+# 2) Verify auto-λ persisted:
+cat ~/Minh/ipf/phase3_outputs/auto_lambda_v3.json | python -m json.tool
+
+# 3) Verify v3 maps:
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_v3_MOT17-09-DPM/M4/
+
+# 4) Encode pilot_v6  (~14 h):
+bash scripts/run_pilot.sh configs/pilot_v6.yaml
+
+# 5) Compare pilot_v1 + pilot_v4 + pilot_v6 (drop v5 — superseded):
+python scripts/compare_pilots.py \
+    ~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v4/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v6/experiment_summary.json
+```
+
+**Pre-registered success criteria for pilot_v6** (intentionally MODEST to
+avoid v5's over-shoot):
+
+1. **AVERAGE BD-Rate-Task ≤ pilot_v4** (currently −8.60 %) — proves
+   auto-λ does not regress.
+2. **Per-(seq, QP) cell tally vs M1/M5/M6 ≥ 4/9** — at least holds the
+   per-cell ground from pilot_v5.
+3. **Stretch goal**: MOT17-09 BD-Rate-Task **≤ −15 %** (does not require
+   matching M6's −39 %; the point is to demonstrate auto-λ helps
+   without over-shooting).
+
+**Decision tree** if pilot_v6 results disagree with the criteria:
+
+| Outcome | Interpretation | Next step |
+|---|---|---|
+| All 3 ✓ | Auto-λ wins clean → write paper | Stop, draft paper |
+| (1) and (2) ✓ but (3) ✗ | Auto-λ neutral-to-good but MOT17-09 still capped | Run pilot_v7 = auto-λ + Action 3 (Q-aware bound) |
+| (1) ✓ but (2) ✗ | Average OK, per-cell weak | Investigate residual distribution per QP; consider larger MLP |
+| (1) ✗ | Auto-λ regression vs v4 | λ choice is **not** the bottleneck — pivot to Action 5 (residual amplitude / saliency mismatch) |
+
 ---
 
 ## 8. Standing Instructions

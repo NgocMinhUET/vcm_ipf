@@ -102,6 +102,91 @@ def teacher_for_sequence(cfg: dict, seq_name: str) -> Dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Action 4 — automatic per-sequence λ_task from M0 anchor elasticity
+# ---------------------------------------------------------------------------
+
+def resolve_auto_lambda(cfg: dict, out_root: Path) -> dict:
+    """If ``auto_lambda.enabled``, compute λ per sequence from M0 elasticity
+    and rewrite ``cfg["teacher_overrides"]`` accordingly.
+
+    Returns the resolved auto-λ payload (also persisted to disk for
+    reproducibility) — empty dict if auto-λ is disabled.
+
+    Design choice (PROJECT_STATE §7.12): auto-λ is the SOLE source of
+    per-sequence ``lambda_task`` overrides when enabled. Any
+    pre-existing ``teacher_overrides[seq]["lambda_task"]`` is overwritten
+    so that the user cannot accidentally combine manual + auto tuning
+    (which would re-introduce the v5 cherry-picking critique). Other
+    teacher keys (``lambda_anchor`` / ``eta`` / ``xi``) in
+    ``teacher_overrides`` are left untouched.
+    """
+    auto_cfg = cfg.get("auto_lambda") or {}
+    if not auto_cfg.get("enabled", False):
+        return {}
+
+    from phase2.phase3.auto_lambda import compute_lambdas, write_metadata
+
+    src = auto_cfg.get("source")
+    if not src:
+        raise SystemExit("auto_lambda.enabled is true but no `source` given")
+    src_path = Path(expand(src)).resolve()
+    if not src_path.exists():
+        raise SystemExit(f"auto_lambda.source not found: {src_path}")
+
+    seq_names = [s["name"] for s in cfg.get("sequences", [])]
+    qp_range = None
+    if auto_cfg.get("qp_min") is not None and auto_cfg.get("qp_max") is not None:
+        qp_range = (int(auto_cfg["qp_min"]), int(auto_cfg["qp_max"]))
+
+    LOG.info("[auto_lambda] computing λ from %s (alpha=%s, clip=[%s, %s])",
+             src_path,
+             auto_cfg.get("alpha", 0.5),
+             auto_cfg.get("lambda_min", 3.5),
+             auto_cfg.get("lambda_max", 7.0))
+
+    results = compute_lambdas(
+        pilot_summary_path=src_path,
+        sequences=seq_names,
+        base_lambda=float(auto_cfg.get("base_lambda", 5.0)),
+        alpha=float(auto_cfg.get("alpha", 0.5)),
+        lambda_min=float(auto_cfg.get("lambda_min", 3.5)),
+        lambda_max=float(auto_cfg.get("lambda_max", 7.0)),
+        slope_mode=str(auto_cfg.get("slope_mode", "median")),
+        qp_range=qp_range,
+    )
+
+    overrides = cfg.setdefault("teacher_overrides", {}) or {}
+    for seq_name, payload in results.items():
+        slot = overrides.setdefault(seq_name, {})
+        slot["lambda_task"] = float(payload["lambda_task"])
+        if payload.get("fallback"):
+            LOG.warning("[auto_lambda] %s: FALLBACK to base_lambda=%.2f "
+                        "(no anchor data found)",
+                        seq_name, payload["lambda_task"])
+        elif payload.get("clipped"):
+            LOG.info("[auto_lambda] %s: elasticity=%.3f  raw=%.2f  "
+                     "lambda_task=%.2f (CLIPPED)",
+                     seq_name, payload["elasticity"],
+                     payload["raw_lambda"], payload["lambda_task"])
+        else:
+            LOG.info("[auto_lambda] %s: elasticity=%.3f  "
+                     "lambda_task=%.2f",
+                     seq_name, payload["elasticity"], payload["lambda_task"])
+    cfg["teacher_overrides"] = overrides
+
+    sfx = version_suffix(cfg)
+    meta_path = out_root / f"auto_lambda{sfx}.json"
+    write_metadata(results, meta_path,
+                    cfg_used={"source": str(src_path),
+                              **{k: auto_cfg[k] for k in
+                                 ("base_lambda", "alpha", "lambda_min",
+                                  "lambda_max", "slope_mode") if k in auto_cfg},
+                              "qp_range": qp_range,
+                              "version": str(cfg.get("version", ""))})
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Steps 1 & 2 — reuse Stage B outputs if available
 # ---------------------------------------------------------------------------
 
@@ -226,7 +311,8 @@ def step_train(cfg, dataset_path: Path, out_root: Path) -> Path:
 
 def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
     sfx = version_suffix(cfg)
-    apply_cfg = cfg.get("apply", {})
+    apply_cfg = cfg.get("apply", {}) or {}
+    qaw = apply_cfg.get("q_aware_bound", {}) or {}
     qp_list = [str(q) for q in cfg["qp_list"]]
     nrow = (int(seq.get("height", 1152)) + 127) // 128
     ncol = (int(seq.get("width", 1920)) + 127) // 128
@@ -246,6 +332,14 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
         "--residual-bound", str(cfg.get("residual_bound", 2.0)),
         "--per-qp",
     ]
+    # Action 3 — opt-in only (default OFF in pilot_v6 / v3 yaml).
+    if bool(qaw.get("enabled", False)):
+        cmd += [
+            "--q-aware-bound",
+            "--q-aware-slope", str(qaw.get("slope", 0.04)),
+            "--q-aware-min",   str(qaw.get("lo",    1.4)),
+            "--q-aware-max",   str(qaw.get("hi",    2.2)),
+        ]
     run(cmd, f"apply_liteqp{sfx}:{seq['name']}")
 
 
@@ -278,9 +372,16 @@ def main() -> None:
     if sfx:
         LOG.info("Versioned run — suffix '%s' will be appended to "
                  "oracle/fit/learned dirs", sfx)
-        if cfg.get("teacher_overrides"):
-            for s, ov in cfg["teacher_overrides"].items():
-                LOG.info("  teacher_override[%s] = %s", s, ov)
+
+    # Action 4 — resolve auto-λ BEFORE the build_dataset step so
+    # teacher_overrides is populated by the time step_build_dataset reads it.
+    # (Disabled when ``auto_lambda.enabled`` is false / missing → no-op.)
+    resolve_auto_lambda(cfg, out_root)
+
+    if cfg.get("teacher_overrides"):
+        LOG.info("Effective teacher_overrides:")
+        for s, ov in cfg["teacher_overrides"].items():
+            LOG.info("  %s = %s", s, ov)
 
     sequences = cfg.get("sequences", [])
     if args.only_sequences:
