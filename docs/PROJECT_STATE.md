@@ -717,6 +717,235 @@ avoid v5's over-shoot):
 | (1) ✓ but (2) ✗ | Average OK, per-cell weak | Investigate residual distribution per QP; consider larger MLP |
 | (1) ✗ | Auto-λ regression vs v4 | λ choice is **not** the bottleneck — pivot to Action 5 (residual amplitude / saliency mismatch) |
 
+### 7.13 Pilot v6 — RESULTS (2026-05-05, 24/24 successful) — auto-λ FIXES v5 but FAILS to beat v4
+
+**Outcome**: 0 of 3 pre-registered criteria from §7.12 passed, BUT auto-λ
+**successfully recovers from v5's regression** (avg BD: +10.14 % → −0.99 %,
+gain **+11.13 pp**). pilot_v4 (fixed λ=5) remains the empirical winner.
+
+| Sequence | auto-λ (median) | **v6 BD** | v4 BD | v5 BD | v6 vs v4 | v6 vs v5 |
+|---|---:|---:|---:|---:|---:|---:|
+| MOT17-02-DPM | 7.00 (CLIPPED) | **−2.39 %** ✓ | −7.82 % | +22.24 % | +5.42 pp ↓ | **−24.6 pp** ↑ |
+| MOT17-04-DPM | 4.58 | **+4.41 %** ❌ | −4.28 % | −4.53 % | +8.69 pp ↓ | +8.94 pp ↓ |
+| MOT17-09-DPM | 5.00 | **−4.99 %** ✓ | −13.72 % | +12.71 % | +8.73 pp ↓ | **−17.7 pp** ↑ |
+| **AVG** |  | **−0.99 %** | **−8.60 %** | +10.14 % | **+7.61 pp** ↓ | **−11.1 pp** ↑ |
+
+**Pre-registered criteria** (§7.12):
+
+| # | Criterion | Got | Verdict |
+|---|---|---|---|
+| 1 | AVG BD ≤ pilot_v4 (−8.60 %) | **−0.99 %** | ❌ FAIL by 7.61 pp |
+| 2 | M4-LiteQP-v3 wins ≥ 4/9 overlap cells | **2/9** | ❌ FAIL by 2 |
+| 3 | STRETCH: MOT17-09 BD ≤ −15 % | **−4.99 %** | ❌ FAIL by 10 pp |
+
+**Root cause #1 — median(elasticity) under-estimates MOT17-04's cliff**:
+
+MOT17-04 has per-arc slopes `[0.094, 0.070, 0.639]` — the last arc
+(QP=42→47, the cliff) has elasticity **6.8× larger** than the median.
+But median(0.094) ignores this signal, giving λ=4.58 < v4's 5.0. Result:
+MOT17-04 QP=42 ΔmAP worsened from −0.044 (v4) to **−0.060 (v6)**, costing
++8.69 pp BD-Rate-Task on the sequence.
+
+**Fix candidate** — `slope_mode: "mean"`:
+
+| Sequence | per-arc slopes | median(e) | **mean(e)** | λ (median) | **λ (mean)** |
+|---|---|---:|---:|---:|---:|
+| MOT17-02-DPM | [0.044, 0.386, 0.258] | 0.258 | 0.229 | 7.00 (CLIPPED) | **4.97** |
+| MOT17-04-DPM | [0.094, 0.070, 0.639] | 0.094 | **0.268** | 4.58 | **5.38** |
+| MOT17-09-DPM | [0.099, 0.485, 0.113] | 0.113 | 0.232 | 5.00 | **5.00** |
+
+Mean-slope λ matches v4's fixed 5.0 ± 0.4 across all 3 sequences and
+specifically **raises** MOT17-04's λ to compensate for the cliff. Expected
+result: pilot_v7 ≈ pilot_v4 with cleaner academic story
+("auto-λ recovers the manually-tuned baseline without per-seq tuning").
+
+**Root cause #2 — joint-MLP cross-sequence contamination**:
+
+MOT17-09 had identical λ=5 in both v4 and v6, yet BD worsened from
+−13.72 % to −4.99 %. The joint MLP is trained on **pooled** data from
+all 3 sequences; changing λ for MOT17-02 (5→7) and MOT17-04 (5→4.58)
+shifts the pooled teacher distribution, polluting MOT17-09's predictions.
+This is a **second-order confound** independent of the λ formula.
+
+**Counterargument to "pivot to Action 5"** (decision tree default for crit-1
+fail): the v6 result is INFORMATIVE, not catastrophic. Average BD
+−0.99 % still beats all heuristics (M1/M5/M6 are +12 to +41 % on
+overlap). Auto-λ doesn't beat v4 but is the **principled defensible
+alternative**. Root cause is identified; fix is a 1-line config change.
+Action 5 (residual amplitude) should follow ONLY if mean-slope variant
+also fails.
+
+**Generated artifacts** (in repo root):
+- `analyze_pilot_v6.py` — full analysis (per-QP Δ, BD, h2h, rank, criteria).
+- `pilot_v6_table.txt` / `pilot_v6_results.json` — numbers.
+- `pilot_v6_fig{1,2,3}_*.png` — v4→v6 comparison, h2h vs heuristics, rank heatmap.
+
+### 7.14 Action 4b — auto-λ with mean slope (NEXT, READY)
+
+**Pivot**: pilot_v6 stays the most defensible auto-λ result *to date*, but
+the median formula is brittle on small datasets where one arc carries
+the cliff signal. `slope_mode: "mean"` is the principled fix — it
+weights all arcs equally, so a steep cliff arc raises elasticity
+proportionally.
+
+**1-line code change**: `auto_lambda.py` already supports
+`slope_mode="mean"` (sanity-tested with the same numerics module that
+backs `slope_mode="median"`). Only the YAML config flips.
+
+**Files added (this commit; not yet pushed)**:
+
+| Path | Purpose |
+|------|---------|
+| `phase2/configs/phase3_liteqp_v4.yaml` | NEW — `version: "v4"`, `auto_lambda.slope_mode: "mean"` |
+| `phase2/configs/pilot_v7.yaml` | NEW — encode M0 vs M4-LiteQP-v4 (auto-λ-mean) |
+| `analyze_pilot_v6.py` | NEW — full pilot_v6 analysis + decision tree evaluation |
+
+**Pre-registered success criteria for pilot_v7** (calibrated to where v6 fell short):
+
+1. **AVERAGE BD ≤ −5.0 %** — recovers the bulk of the gap to v4 without
+   demanding equal-or-better (acknowledges v4 may be a near-optimal
+   sweet spot for this dataset).
+2. **MOT17-04 BD ≤ 0 %** — no regression on the sequence that caused v6's
+   biggest loss.
+3. **STRETCH**: AVG BD ≤ pilot_v4 (−8.60 %) — fully recovers v4 baseline.
+
+**Decision tree if pilot_v7 results**:
+
+| Outcome | Interpretation | Next step |
+|---|---|---|
+| All 3 ✓ | Mean slope solves it cleanly | Stop. Write paper with auto-λ-mean as principled method. |
+| (1) and (2) ✓, (3) ✗ | Mean slope recovers most of the loss | Pilot_v8 = auto-λ-mean + per-seq MLP (eliminate cross-contamination) |
+| (1) ✗ but MOT17-04 ≈ v4 | Cliff fix works but cross-contamination dominates | Skip mean-vs-median, pivot to per-seq MLP |
+| (1) ✗ AND MOT17-04 still bad | Neither cliff nor contamination is the bottleneck | Pivot to Action 5 (residual amplitude / saliency mismatch) |
+
+### 7.15 Action 5 — Architectural pivot to spatial CNN (READY, NOT YET ENCODED)
+
+**Why pivot away from auto-λ entirely**: 
+
+User feedback (2026-05-05): the median-vs-mean λ debate is itself
+heuristic. The deeper issue is that **per-sequence λ is the wrong
+abstraction**. The optimal Lagrangian λ from KKT theory is **per-CTU**:
+
+$$ \lambda^*_c = -\frac{\partial R / \partial \delta_c}{\partial D_{\text{task}} / \partial \delta_c} $$
+
+→ depends on local (φ_c, K_c, σ_c, motion_c, **neighbors**). The current
+per-CTU MLP cannot see neighbors, so it can never approximate this
+optimum well no matter how λ is chosen at the sequence level.
+
+**Solution**: replace the per-CTU MLP with a small spatial CNN that has
+3×3 receptive fields and skip connections. The CNN's spatial inductive
+bias is the **architectural counterpart** of the elasticity formula —
+both want to express that "λ matters locally" — but the CNN does so
+without imposing a one-scalar bottleneck per sequence.
+
+**AB-test design (pilot_v8a vs pilot_v8b)**:
+
+| Variant | Inference equation | Tests |
+|---|---|---|
+| pilot_v8a (`cnn_residual`) | δ = δ_A+(φ, K, Q) + r̂_CNN(features) | Spatial CNN on TOP of analytic prior — conservative |
+| pilot_v8b (`cnn_direct`)   | δ = δ̂_CNN(features) (no A+ prior)     | End-to-end CNN — aggressive |
+| Δ(v8b − v8a) | — | Value of the analytic A+ prior |
+
+**Architecture (identical for both modes)**:
+
+```
+Input: (B, 7, 9, 15)
+  ch0=φ  ch1=K_norm  ch2=σ_y  ch3=motion
+  ch4=prev_δ/8  ch5=q_base_norm (broadcast)  ch6=phi_grad
+
+Conv 3×3 pad=1   7→16 ch + GroupNorm(4) + ReLU
+Conv 3×3 pad=1  16→16 ch + GroupNorm(4) + ReLU
+Conv 3×3 pad=1  16→16 ch  + skip from φ + GroupNorm(4) + ReLU
+Conv 1×1        16→1  ch
+tanh × output_bound  →  output ∈ [−bound, +bound]
+
+Total: 5,809 trainable parameters (verified by sanity check)
+```
+
+**Loss** (Lagrangian-inspired, λ FIXED at 5.0 — pilot_v4 sweet spot):
+
+$$ \mathcal{L} = \text{Huber}(\hat y, y_{\text{oracle}}) + \alpha_{\text{RNP}} \cdot \frac{(\Sigma K_c \hat y_c)^2}{(\Sigma K_c)^2} + \alpha_{\text{TV}} \cdot \text{TV}(\hat y) + \alpha_{\text{BND}} \cdot \text{ReLU}(|\hat y| - \delta_{\max})^2 $$
+
+Sample-weighted Huber `(0.2 + φ + 0.1·K̃)` matches the MLP trainer.
+
+**Files added (this commit, NOT YET PUSHED)**:
+
+| Path | Purpose |
+|------|---------|
+| `phase2/src/phase2/phase3/liteqp_cnn.py` | NEW — model + spatial dataset + loss components + save/load |
+| `phase2/src/phase2/phase3/train_liteqp_cnn.py` | NEW — LOSO + bootstrap CI training loop, mirror of MLP trainer's CLI |
+| `phase2/src/phase2/phase3/apply_liteqp_model.py` | MOD — `--mode {cnn_residual, cnn_direct}` + `--device` flags |
+| `phase2/scripts/run_phase3_liteqp_pipeline.py` | MOD — `train.backend: "mlp"|"cnn"` resolver + CNN command-line wiring |
+| `phase2/scripts/sanity_check_phase3_cnn.py` | NEW — 7 tests on real synthetic data, all PASS locally (PyTorch CPU) |
+| `phase2/configs/phase3_liteqp_cnn_residual.yaml` | NEW — `version: "v5r"`, `backend: "cnn"`, `output_mode: "residual"` |
+| `phase2/configs/phase3_liteqp_cnn_direct.yaml` | NEW — `version: "v5d"`, `backend: "cnn"`, `output_mode: "direct"` |
+| `phase2/configs/pilot_v8a.yaml` | NEW — encode M0 vs LiteQP-CNN-residual |
+| `phase2/configs/pilot_v8b.yaml` | NEW — encode M0 vs LiteQP-CNN-direct |
+
+**Backend switch is fully backward-compatible** — pilot_v4/v5/v6/v7 yamls
+do NOT specify `train.backend`, so they fall back to MLP. Adding
+`backend: "cnn"` to any v3/v4 yaml would re-train it as CNN.
+
+**Local sanity check results** (PyTorch 2.8.0 CPU on Windows):
+
+```
+[1] Architecture build (residual / direct): both n_params=5,809 ✓
+[2] Spatial dataset reconstruction: 12 samples (2 seq × 3 frames × 2 QPs) ✓
+[3] Loss + backward: 16/16 params updated for both modes ✓
+[4] Tiny training: loss 0.0102 → 0.0059 in 5 epochs (42.3% drop) ✓
+[5] Save + load round-trip: max |Δ| = 0.00 ✓
+[6] Inference helpers (make_input_planes / cnn_predict): correct shapes ✓
+[7] Orchestrator backend resolver: 4/4 yamls correctly identified ✓
+```
+
+**Pre-registered success criteria for pilot_v8a (CNN-residual)**:
+
+1. **Either pilot_v8a or pilot_v8b avg BD ≤ pilot_v4 (−8.60 %)**
+   — at least one CNN variant must match or beat the MLP baseline.
+2. **No per-sequence regression vs pilot_v4** — MOT17-04 BD ≤ 0,
+   MOT17-09 BD ≤ −10, MOT17-02 BD ≤ −5.
+3. **STRETCH**: avg BD ≤ −12 % — improves *materially* on MLP baseline.
+
+**Ablation story for paper**:
+
+| Method | Spatial context | A+ prior | Per-CTU model | Notes |
+|---|---|---|---|---|
+| pilot_v4 (M4-MLP-LiteQP) | none | yes | sklearn MLP, ~2.7k params | empirical baseline (−8.60 %) |
+| **pilot_v8a (M4-CNN-residual)** | 3×3 conv, 7×7 RF | yes | 16-ch CNN, ~5.8k params | **TBD** |
+| **pilot_v8b (M4-CNN-direct)**   | 3×3 conv, 7×7 RF | **no**  | 16-ch CNN, ~5.8k params | **TBD** |
+| `Δ(v8a − v4)` | — | — | — | value of spatial inductive bias |
+| `Δ(v8b − v8a)` | — | — | — | value of analytic A+ prior |
+
+**Run sequence on server** (re-uses pilot_v4 saliency + rate caches; ~28 h
+encode total for both arms):
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# 1) Local CNN sanity check (CPU is fine for this — ~15 sec):
+PYTHONPATH=src python scripts/sanity_check_phase3_cnn.py
+
+# 2) Build → train (CNN) → apply for residual variant  (~30 min)
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_cnn_residual.yaml --start-step 3
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_v5r_*/M4/
+
+# 3) Build → train (CNN) → apply for direct variant   (~30 min)
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_cnn_direct.yaml --start-step 3
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_v5d_*/M4/
+
+# 4) Encode pilot_v8a (~14 h) and pilot_v8b (~14 h) — sequential or parallel
+bash scripts/run_pilot.sh configs/pilot_v8a.yaml
+bash scripts/run_pilot.sh configs/pilot_v8b.yaml
+
+# 5) Final comparison: pilot_v4 (MLP baseline) vs both CNN variants
+python scripts/compare_pilots.py \
+    ~/Minh/ipf/phase2_outputs/pilot_v4/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v8a/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v8b/experiment_summary.json
+```
+
 ---
 
 ## 8. Standing Instructions

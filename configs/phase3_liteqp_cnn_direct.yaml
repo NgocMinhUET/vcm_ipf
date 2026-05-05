@@ -1,0 +1,103 @@
+# =============================================================================
+# Phase 3 Stage C v5d — LiteQP-CNN (DIRECT mode, end-to-end, no A+ prior)
+# =============================================================================
+# Action 5b (PROJECT_STATE §7.15). The CNN predicts the FULL δ map
+# directly, bypassing the analytic A+ prior. Aggressive variant — tests
+# whether the analytic A+ prior is necessary at all, or merely a useful
+# scaffold for the per-CTU MLP. Identical to ``phase3_liteqp_cnn_residual.yaml``
+# except for ``train.output_mode`` and tighter regularisation.
+#
+# Architecture / training data / λ are identical to v5r so the AB
+# comparison vs v5r isolates the contribution of the analytic prior:
+#
+#     v5r  →  δ = δ_A+(φ, K, Q)  +  r̂(features)        # CNN learns the gap
+#     v5d  →  δ = δ̂(features)                          # CNN learns δ end-to-end
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v5d"
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0     # NOTE: ignored at inference (direct mode), but kept
+                         # so build_liteqp_dataset reads the same flat JSONL.
+
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+teacher_overrides: {}
+auto_lambda:
+  enabled: false
+
+train:
+  backend:      "cnn"
+  output_mode:  "direct"     # ← KEY DIFFERENCE vs v5r
+
+  # Architecture
+  output_bound: 8.0          # full δ range [−8, +8] (matches VVC legal bounds)
+
+  # Optimisation
+  epochs:       100
+  batch_size:   16
+  lr:           0.001
+  weight_decay: 0.0001
+  device:       "cuda:0"
+  seed:         20260506
+
+  # Loss — alpha_bound is ACTIVE in direct mode (penalises any drift
+  # beyond the legal δ envelope).
+  huber_delta:  0.5
+  alpha_rnp:    0.10
+  alpha_tv:     0.005
+  alpha_bound:  0.10
+  delta_max:    8.0
+
+  cv:               "both"
+  n_bootstrap:      500
+  bootstrap_alpha:  0.05
+
+apply:
+  # mode auto-resolves to "cnn_direct" because train.output_mode == "direct".
+  device: "cuda:0"
+
+  q_aware_bound:
+    enabled: false
+    slope: 0.04
+    lo:    1.4
+    hi:    2.2

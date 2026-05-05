@@ -286,9 +286,54 @@ def concatenate_datasets(cfg, out_root: Path) -> Path:
 # Step 5 — train MLP residual
 # ---------------------------------------------------------------------------
 
+def _backend(cfg: dict) -> str:
+    """Resolve which residual model backend to use.
+
+    ``cfg.train.backend`` ∈ {"mlp", "cnn"}. Default: "mlp" (legacy v3/v4
+    behaviour). When set to "cnn", ``train.output_mode`` selects between
+    "residual" (PROJECT_STATE §7.15 conservative variant) and "direct"
+    (aggressive variant; no A+ prior at inference).
+    """
+    train_cfg = cfg.get("train", {}) or {}
+    return str(train_cfg.get("backend", "mlp")).lower()
+
+
 def step_train(cfg, dataset_path: Path, out_root: Path) -> Path:
     sfx = version_suffix(cfg)
-    train_cfg = cfg.get("train", {})
+    train_cfg = cfg.get("train", {}) or {}
+    backend = _backend(cfg)
+
+    if backend == "cnn":
+        # CNN backend (PROJECT_STATE §7.15)
+        model_path = out_root / "fit" / f"liteqp_cnn{sfx}.pt"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable, "-m", "phase2.phase3.train_liteqp_cnn",
+            "--oracle", str(dataset_path),
+            "--output", str(model_path),
+            "--output-mode", str(train_cfg.get("output_mode", "residual")),
+            "--residual-bound", str(cfg.get("residual_bound", 2.0)),
+            "--epochs",      str(train_cfg.get("epochs", 100)),
+            "--batch-size",  str(train_cfg.get("batch_size", 16)),
+            "--lr",          str(train_cfg.get("lr", 1e-3)),
+            "--weight-decay", str(train_cfg.get("weight_decay", 1e-4)),
+            "--device",      str(train_cfg.get("device", "cpu")),
+            "--seed",        str(train_cfg.get("seed", 20260506)),
+            "--huber-delta", str(train_cfg.get("huber_delta", 0.5)),
+            "--alpha-rnp",   str(train_cfg.get("alpha_rnp", 0.10)),
+            "--alpha-tv",    str(train_cfg.get("alpha_tv",  0.005)),
+            "--alpha-bound", str(train_cfg.get("alpha_bound", 0.10)),
+            "--delta-max",   str(train_cfg.get("delta_max",  8.0)),
+            "--cv",            train_cfg.get("cv", "both"),
+            "--n-bootstrap",  str(train_cfg.get("n_bootstrap", 500)),
+            "--bootstrap-alpha", str(train_cfg.get("bootstrap_alpha", 0.05)),
+        ]
+        if "output_bound" in train_cfg:
+            cmd += ["--output-bound", str(train_cfg["output_bound"])]
+        run(cmd, f"train_liteqp_cnn{sfx}")
+        return model_path
+
+    # Legacy MLP backend (default)
     model_path = out_root / "fit" / f"liteqp_mlp{sfx}.joblib"
     model_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -313,13 +358,28 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
     sfx = version_suffix(cfg)
     apply_cfg = cfg.get("apply", {}) or {}
     qaw = apply_cfg.get("q_aware_bound", {}) or {}
+    train_cfg = cfg.get("train", {}) or {}
+    backend = _backend(cfg)
+
+    # Resolve --mode for apply_liteqp_model.py based on backend + output_mode.
+    # Legacy MLP keeps the original "liteqp" / "a_plus" choices.
+    if backend == "cnn":
+        explicit_mode = apply_cfg.get("mode")
+        if explicit_mode in ("cnn_residual", "cnn_direct"):
+            mode = explicit_mode
+        else:
+            output_mode = str(train_cfg.get("output_mode", "residual"))
+            mode = "cnn_residual" if output_mode == "residual" else "cnn_direct"
+    else:
+        mode = apply_cfg.get("mode", "liteqp")
+
     qp_list = [str(q) for q in cfg["qp_list"]]
     nrow = (int(seq.get("height", 1152)) + 127) // 128
     ncol = (int(seq.get("width", 1920)) + 127) // 128
     target_dir = out_root / "learned" / f"liteqp{sfx}_{seq['name']}" / "M4"
     cmd = [
         sys.executable, "-m", "phase2.phase3.apply_liteqp_model",
-        "--mode", apply_cfg.get("mode", "liteqp"),
+        "--mode", mode,
         "--model", str(model_path),
         "--rate-npz", str(out_root / "rate" / seq["name"] / "rate_surrogate.npz"),
         "--saliency-dir", str(out_root / "saliency" / seq["name"]),
@@ -332,6 +392,10 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
         "--residual-bound", str(cfg.get("residual_bound", 2.0)),
         "--per-qp",
     ]
+    # CNN inference device (default to whatever was used for training).
+    if backend == "cnn":
+        device = apply_cfg.get("device", train_cfg.get("device", "cpu"))
+        cmd += ["--device", str(device)]
     # Action 3 — opt-in only (default OFF in pilot_v6 / v3 yaml).
     if bool(qaw.get("enabled", False)):
         cmd += [

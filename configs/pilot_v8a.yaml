@@ -1,0 +1,76 @@
+# =============================================================================
+# Phase 2 Pilot v8a — LiteQP-CNN residual mode (small CNN replaces MLP)
+# =============================================================================
+# AB-test arm A. M0 anchor vs M4 = LiteQP-CNN (residual mode, A+ prior kept).
+# See PROJECT_STATE §7.15 / phase3_liteqp_cnn_residual.yaml for design.
+#
+# Pre-requisite directory layout (must already exist on the server):
+#   ~/Minh/ipf/phase3_outputs/learned/liteqp_v5r_<seq>/M4/qp_vtm_delta_QP{27,32,37,42}/
+#
+# Produced by:
+#   PYTHONPATH=src python phase2/scripts/run_phase3_liteqp_pipeline.py \
+#       --config phase2/configs/phase3_liteqp_cnn_residual.yaml --start-step 3
+#
+# Steps 1-2 share saliency/rate caches with pilot_v4/v5/v6 → auto-skip.
+# Step 5 trains a CNN (~10-20 min on cuda:0, ~5,600 params).
+#
+# Grid: 3 seq × 2 methods × 4 QPs × 50 frames = 24 runs ≈ 14 h on a single GPU.
+# =============================================================================
+
+experiment_id: "pilot_v8a"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
+  phase1_run_prefix: "liteqp_v5r_"  # ← MUST match version in phase3_liteqp_cnn_residual.yaml
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1

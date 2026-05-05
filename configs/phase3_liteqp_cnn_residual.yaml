@@ -1,0 +1,113 @@
+# =============================================================================
+# Phase 3 Stage C v5r — LiteQP-CNN (residual mode, A+ prior preserved)
+# =============================================================================
+# Action 5a (PROJECT_STATE §7.15). REPLACES the per-CTU MLP residual model
+# with a small spatial CNN (3 conv layers, 16 ch, ~5,600 params). The
+# analytic A+ prior is RETAINED — the CNN learns the residual r̂ such that
+#
+#     δ = δ_A+(φ, K, Q_base)  +  r̂(φ, K, σ, motion, prev_δ, Q, ∇φ)
+#
+# This is the CONSERVATIVE variant of the CNN pivot: any improvement vs
+# pilot_v4 is unambiguously attributable to the spatial inductive bias of
+# 3×3 convs (vs the per-CTU MLP), because all other components — A+
+# prior, λ_task, residual_bound, training data — are identical to v4.
+#
+# λ_task is FIXED at 5.0 (pilot_v4 validation sweet spot). No per-sequence
+# auto-λ — that direction is parked while we test the architectural fix.
+#
+# Why "v5r" not "v5"? v5 would imply a single variant; v5r/v5d makes it
+# explicit that pilot_v8 has TWO siblings (residual + direct) for AB-test.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v5r"
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0
+
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian (FIXED λ=5, no auto-λ in CNN era) ────────────
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+teacher_overrides: {}      # explicitly empty → all sequences use λ=5
+
+auto_lambda:
+  enabled: false           # auto-λ direction parked (see §7.13/§7.14/§7.15)
+
+# ── Step 5 — CNN training ────────────────────────────────────────────────────
+train:
+  backend:      "cnn"      # ← KEY SWITCH; selects train_liteqp_cnn.py
+  output_mode:  "residual" # CNN predicts r̂; final δ = δ_A+ + r̂
+
+  # Architecture (passed through to train_liteqp_cnn.py):
+  output_bound: 2.0        # tanh × 2.0 → r̂ ∈ [−2, +2] (matches residual_bound)
+
+  # Optimisation
+  epochs:       100
+  batch_size:   16
+  lr:           0.001
+  weight_decay: 0.0001
+  device:       "cuda:0"
+  seed:         20260506
+
+  # Loss weights (Lagrangian-inspired multi-term loss)
+  huber_delta:  0.5        # robustness threshold (units: dQP steps)
+  alpha_rnp:    0.10       # rate-neutral penalty
+  alpha_tv:     0.005      # total-variation smoothness
+  alpha_bound:  0.10       # only used in direct mode (kept for parity)
+  delta_max:    8.0
+
+  # Eval
+  cv:               "both" # LOSO + full fit
+  n_bootstrap:      500
+  bootstrap_alpha:  0.05
+
+# ── Step 6 — apply ───────────────────────────────────────────────────────────
+apply:
+  # Orchestrator auto-derives mode = "cnn_residual" because train.output_mode == "residual".
+  device: "cuda:0"
+
+  # Action 3 still OFF for clean attribution (CNN vs MLP comparison must
+  # be on identical residual_cap=2.0 across all QPs).
+  q_aware_bound:
+    enabled: false
+    slope: 0.04
+    lo:    1.4
+    hi:    2.2

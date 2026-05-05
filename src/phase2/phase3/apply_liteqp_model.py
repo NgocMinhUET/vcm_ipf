@@ -175,11 +175,18 @@ def _write_delta_map(delta: np.ndarray, output_path: Path, frame_idx: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Apply LiteQP / A+ to make dQP maps")
-    parser.add_argument("--mode", choices=["liteqp", "a_plus"], required=True,
-                        help='"liteqp" = A+ + MLP residual; "a_plus" = analytic baseline')
+    parser.add_argument("--mode", choices=["liteqp", "a_plus", "cnn_residual",
+                                            "cnn_direct"],
+                        required=True,
+                        help='"liteqp"        = A+ + MLP residual; '
+                             '"a_plus"        = analytic baseline; '
+                             '"cnn_residual"  = A+ + CNN residual (PROJECT_STATE §7.15); '
+                             '"cnn_direct"    = end-to-end CNN, NO A+ prior.')
     parser.add_argument("--model", default="",
-                        help="Required if mode=liteqp; joblib bundle from "
-                             "train_liteqp_regressor.py")
+                        help="Required if mode=liteqp/cnn_*; "
+                             "joblib bundle (MLP) or .pt bundle (CNN)")
+    parser.add_argument("--device", default="cpu",
+                        help="Torch device for CNN inference (default cpu).")
     parser.add_argument("--rate-npz", required=True)
     parser.add_argument("--saliency-dir", required=True)
     parser.add_argument("--frames-dir", default="",
@@ -227,8 +234,12 @@ def main() -> None:
     out_root = Path(args.output_dir).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # ── Load model (mode=liteqp) ───────────────────────────────────────────
+    # ── Load model (mode=liteqp / cnn_*) ───────────────────────────────────
+    # ``pipeline`` (sklearn MLP) and ``cnn_model`` (PyTorch nn.Module) are
+    # mutually exclusive — only one is populated based on ``--mode``.
     pipeline = None
+    cnn_model = None
+    cnn_bundle = None
     if args.mode == "liteqp":
         if not args.model:
             raise SystemExit("--model required when --mode liteqp")
@@ -238,11 +249,34 @@ def main() -> None:
             raise SystemExit("joblib required: %s" % exc) from exc
         bundle = joblib.load(Path(args.model).expanduser().resolve())
         pipeline = bundle["model"]
-        logger.info("Loaded LiteQP model bundle from %s", args.model)
+        logger.info("Loaded LiteQP MLP bundle from %s", args.model)
         meta = bundle.get("meta", {})
         if meta.get("feature_names") and meta["feature_names"] != FEATURE_NAMES:
             logger.warning("Feature schema drift: model expects %s; current %s",
                            meta["feature_names"], FEATURE_NAMES)
+    elif args.mode in ("cnn_residual", "cnn_direct"):
+        if not args.model:
+            raise SystemExit(f"--model required when --mode {args.mode}")
+        from phase2.phase3.liteqp_cnn import load_bundle as _cnn_load_bundle
+        cnn_model, cnn_bundle = _cnn_load_bundle(
+            Path(args.model).expanduser().resolve())
+        # Move model to requested device.
+        try:
+            import torch  # noqa: F401
+            cnn_model.to(args.device)
+        except Exception as exc:
+            logger.warning("Could not move CNN to %s (%s); using CPU.",
+                            args.device, exc)
+            args.device = "cpu"
+        # Sanity: ``--mode`` must match what the bundle was trained for.
+        expected_mode = ("residual" if args.mode == "cnn_residual" else "direct")
+        if cnn_bundle.output_mode != expected_mode:
+            raise SystemExit(
+                f"Bundle was trained with output_mode={cnn_bundle.output_mode!r}, "
+                f"but --mode {args.mode} expects {expected_mode!r}.")
+        logger.info("Loaded LiteQP-CNN bundle (mode=%s, n_input=%d, n_params=%d) "
+                     "from %s", cnn_bundle.output_mode, cnn_bundle.n_input_channels,
+                     sum(p.numel() for p in cnn_model.parameters()), args.model)
 
     # ── Pre-compute σ_Y / motion (only for liteqp mode) ────────────────────
     sigma_per_frame: List[np.ndarray] = []
@@ -338,11 +372,13 @@ def main() -> None:
                                if (K_grid > 0).any() else 1.0)
 
             # 1) Analytic prior + exact rate-neutral projection
+            #    NOTE: cnn_direct mode bypasses A+ entirely (delta_a is still
+            #    computed for metadata purposes — useful for diagnostics).
             delta_a = compute_a_plus_delta(phi_norm, K_grid, qp, cfg)
             delta_a = project_rate_neutral_exact(delta_a, K_grid)
 
             if args.mode == "liteqp":
-                # 2) Build features + predict residual
+                # 2) Build features + predict residual (per-CTU MLP)
                 phi_nbr = _phi_neighbor_mean(phi_norm)
                 phi_grd = _phi_gradient(phi_norm)
                 feats = []
@@ -365,6 +401,28 @@ def main() -> None:
                 r_hat = np.clip(r_hat, -residual_cap, +residual_cap)
                 r_hat = r_hat.reshape(args.ctu_rows, args.ctu_cols)
                 delta_pred = delta_a + r_hat
+            elif args.mode in ("cnn_residual", "cnn_direct"):
+                # 2) Build the spatial feature stack (7 channels) and run
+                #    one CNN forward pass — much cheaper than the per-CTU
+                #    MLP loop.
+                from phase2.phase3.liteqp_cnn import (
+                    make_input_planes as _cnn_make_input_planes,
+                    cnn_predict as _cnn_predict,
+                )
+                phi_grd = _phi_gradient(phi_norm)
+                planes = _cnn_make_input_planes(
+                    phi=phi_norm, K_norm=K_norm,
+                    sigma=sigma_per_frame[fi], motion=motion_per_frame[fi],
+                    prev_delta=prev_delta,
+                    q_base_norm=float((qp - 32.0) / 10.0),
+                    phi_grad=phi_grd,
+                )
+                cnn_out = _cnn_predict(cnn_model, planes, device=args.device)
+                if args.mode == "cnn_residual":
+                    cnn_out = np.clip(cnn_out, -residual_cap, +residual_cap)
+                    delta_pred = delta_a + cnn_out
+                else:  # cnn_direct: model output IS the δ map
+                    delta_pred = cnn_out
             else:  # a_plus mode
                 delta_pred = delta_a
 
@@ -411,10 +469,16 @@ def main() -> None:
         )
 
     # ── Persist metadata ───────────────────────────────────────────────────
+    method_label = {
+        "liteqp":       "M4-LiteQP",
+        "a_plus":       "M4-A+",
+        "cnn_residual": "M4-CNN-residual",
+        "cnn_direct":   "M4-CNN-direct",
+    }[args.mode]
     meta = {
-        "method":        f"M4-{'LiteQP' if args.mode == 'liteqp' else 'A+'}",
+        "method":        method_label,
         "mode":          args.mode,
-        "model_path":    args.model if args.mode == "liteqp" else None,
+        "model_path":    args.model if args.mode != "a_plus" else None,
         "saliency_dir":  str(sal_dir),
         "rate_npz":      str(Path(args.rate_npz).resolve()),
         "frames_dir":    str(frames_dir) if frames_dir else None,
