@@ -1,0 +1,98 @@
+# =============================================================================
+# Phase 3 Stage C v4 — LiteQP with auto-λ (MEAN slope, fixes v3 cliff bias)
+# =============================================================================
+# Action 4b (PROJECT_STATE §7.14): identical to phase3_liteqp_v3.yaml EXCEPT
+# `auto_lambda.slope_mode: "mean"`. Motivated by pilot_v6 diagnosis: median
+# slope under-estimated MOT17-04's cliff arc (QP=42→47, e=0.639), giving
+# λ=4.58 < v4's empirical 5.0 and producing BD-Rate-Task = +4.41 %.
+#
+# Expected auto-λ values (from pilot_v1 M0 anchor, MEAN of per-arc slopes):
+#
+#   sequence       elasticity_mean    auto-λ_mean    cf. v3 median   cf. v4 fixed
+#   ---------------------------------------------------------------------------
+#   MOT17-02-DPM      0.229            4.97          7.00 (clipped)     5.0
+#   MOT17-04-DPM      0.268            5.38          4.58              5.0
+#   MOT17-09-DPM      0.232            5.00          5.00              5.0
+#
+# All three λ values land within ±0.4 of v4's fixed 5.0 — but MOT17-04's λ
+# is now 5.38 (HIGHER, addressing the cliff). This eliminates the v3 weakness
+# while keeping the principled "no manual tuning" property.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v4"           # appends "_v4" to oracle / fit / learned dirs
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0
+
+# ── Sequences (identical to v1/v2/v3) ────────────────────────────────────────
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+# ── Step 1 — saliency (UNCHANGED, cached output reused) ──────────────────────
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian (defaults; auto-λ overrides) ─────────────────
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+teacher_overrides: {}
+
+# ── Action 4b — auto-λ with MEAN slope (key change vs v3) ────────────────────
+auto_lambda:
+  enabled:     true
+  source:      "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+  base_lambda: 5.0
+  alpha:       0.5
+  lambda_min:  3.5
+  lambda_max:  7.0
+  slope_mode:  "mean"      # ← v4 KEY CHANGE (v3 used "median")
+
+# ── Step 5 — MLP training (fresh seed to avoid v3 init coincidences) ─────────
+train:
+  cv: "both"
+  max_iter: 400
+  seed: 20260505           # bumped vs v3 (which was 20260501)
+  n_bootstrap: 500
+  bootstrap_alpha: 0.05
+
+# ── Step 6 — apply (Action 3 STILL OFF for clean attribution) ────────────────
+apply:
+  mode: "liteqp"
+  q_aware_bound:
+    enabled: false
+    slope: 0.04
+    lo:    1.4
+    hi:    2.2

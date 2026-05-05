@@ -1,0 +1,82 @@
+# =============================================================================
+# Phase 2 Pilot v7 — LiteQP v4 (auto-λ MEAN slope; fixes v3 cliff bias)
+# =============================================================================
+# Compares M0 (uniform anchor) against M4 = LiteQP v4 (auto-λ-mean; see
+# PROJECT_STATE §7.14). Tests whether mean-slope auto-λ recovers v4's
+# baseline performance while keeping the "no manual tuning" property.
+#
+# Pre-requisite directory layout (must already exist on the server before
+# encoding):
+#   ~/Minh/ipf/phase3_outputs/learned/liteqp_v4_<seq>/M4/qp_vtm_delta_QP{27,32,37,42}/
+#
+# Produced by:
+#   PYTHONPATH=src python phase2/scripts/run_phase3_liteqp_pipeline.py \
+#       --config phase2/configs/phase3_liteqp_v4.yaml --start-step 3
+#
+# (Steps 1-2 share saliency / rate caches with pilot_v4/v5/v6 — auto-skip.)
+#
+# Grid: 3 seq × 2 methods × 4 QPs × 50 frames = 24 runs ≈ 14 h on a single GPU.
+#
+# Pre-registered success criteria for pilot_v7 (PROJECT_STATE §7.14):
+#   (1) AVERAGE BD ≤ −5.0 %        (recovers most of v6 → v4 gap)
+#   (2) MOT17-04 BD ≤ 0 %          (no regression on cliff sequence)
+#   (3) STRETCH: AVG BD ≤ −8.60 %  (full v4 recovery)
+# =============================================================================
+
+experiment_id: "pilot_v7"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
+  phase1_run_prefix: "liteqp_v4_"     # ← prefix change vs pilot_v6 ("liteqp_v3_")
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
