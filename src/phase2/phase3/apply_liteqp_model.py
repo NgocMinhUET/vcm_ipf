@@ -62,25 +62,33 @@ logger = logging.getLogger("phase2.phase3.apply_liteqp_model")
 def q_aware_residual_bound(qp: int, base: float = 2.0,
                             slope: float = 0.04,
                             lo: float = 1.4, hi: float = 2.2) -> float:
-    """Residual bound that tightens linearly with Q_base around Q=32.
-
-    Motivation (PROJECT_STATE §7.10/7.12 verdict): high-QP encodes are
-    near the intra-prediction stability cliff — large MLP residuals there
-    can collapse mAP. Low-QP encodes have spare bit budget and tolerate
-    bigger swings.
-
-    Schedule (default ``slope=0.04``, gentle — chosen so MOT17-09's
-    +0.102 mAP gain at QP=42 from pilot_v5 can still be reproduced under
-    the bound):
+    """Residual bound that varies linearly with Q_base around Q=32.
 
         bound(Q) = clip(base − slope · (Q − 32),  lo,  hi)
 
-        QP=27 → 2.20    QP=32 → 2.00    QP=37 → 1.80    QP=42 → 1.60
+    Sign of ``slope`` selects two opposite use-cases:
 
-    NOTE: this code path is GATED behind ``--q-aware-bound`` and stays
-    disabled in pilot_v6 (the v3 / Action-4 pilot) so we can attribute
-    any change in BD-Rate-Task purely to auto-λ. It is wired here so a
-    later pilot_v7 (Action 3 + 4) is a one-line config flip.
+    *  ``slope > 0`` — TIGHTER at HIGH QP. (PROJECT_STATE §7.10/7.12.)
+       Motivation: high-QP encodes are near the intra-prediction stability
+       cliff — large MLP residuals there can collapse mAP. Low-QP encodes
+       have spare bit budget and tolerate bigger swings. Default schedule
+       (``slope=0.04, lo=1.4, hi=2.2``):
+
+           QP=27 → 2.20    QP=32 → 2.00    QP=37 → 1.80    QP=42 → 1.60
+
+    *  ``slope < 0`` — TIGHTER at LOW QP. (PROJECT_STATE §7.16, Path F.)
+       Motivation: pilot_v8b (CNN-direct) regressed at QP=27 because
+       redistribution doesn't help when M0 already has spare bits; it
+       just costs mAP. Tightening δ at low QP forces the CNN to be
+       conservative when there's nothing to gain. Recommended schedule
+       (``slope=-0.10, base=2.0, lo=1.0, hi=3.0``):
+
+           QP=27 → 1.50    QP=32 → 2.00    QP=37 → 2.50    QP=42 → 3.00
+
+    Applied to:
+      - ``cnn_residual``: clamps the CNN's residual r̂ → matching MLP semantics.
+      - ``cnn_direct``  : clamps the FULL δ̂ output of the CNN. Same formula,
+                           different target — kept under one flag for orthogonality.
     """
     return float(min(max(base - slope * (qp - 32.0), lo), hi))
 
@@ -419,10 +427,19 @@ def main() -> None:
                 )
                 cnn_out = _cnn_predict(cnn_model, planes, device=args.device)
                 if args.mode == "cnn_residual":
+                    # ``residual_cap`` is the MLP-style residual bound (or the
+                    # Q-aware schedule when --q-aware-bound is on).
                     cnn_out = np.clip(cnn_out, -residual_cap, +residual_cap)
                     delta_pred = delta_a + cnn_out
                 else:  # cnn_direct: model output IS the δ map
-                    delta_pred = cnn_out
+                    if args.q_aware_bound:
+                        # Path F (PROJECT_STATE §7.16): clip the FULL δ̂
+                        # output by the same Q-aware schedule. Negative
+                        # ``--q-aware-slope`` tightens at low QP, where
+                        # pilot_v8b's CNN was over-aggressive.
+                        delta_pred = np.clip(cnn_out, -residual_cap, +residual_cap)
+                    else:
+                        delta_pred = cnn_out
             else:  # a_plus mode
                 delta_pred = delta_a
 

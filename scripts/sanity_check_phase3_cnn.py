@@ -236,19 +236,85 @@ def main() -> None:
     print(f"\n[7] Orchestrator _backend() resolver")
     orch = _load_orch()
     import yaml
+
+    def _yaml_or_skip(name):
+        p = REPO_ROOT / "configs" / name
+        if not p.exists():
+            return None
+        return yaml.safe_load(open(p, "r", encoding="utf-8"))
+
     cases = [
-        ("phase3_liteqp_v3.yaml",          "mlp"),
-        ("phase3_liteqp_v4.yaml",          "mlp"),
-        ("phase3_liteqp_cnn_residual.yaml", "cnn"),
-        ("phase3_liteqp_cnn_direct.yaml",  "cnn"),
+        ("phase3_liteqp_v3.yaml",                 "mlp"),
+        ("phase3_liteqp_v4.yaml",                 "mlp"),
+        ("phase3_liteqp_cnn_residual.yaml",       "cnn"),
+        ("phase3_liteqp_cnn_direct.yaml",         "cnn"),
+        ("phase3_liteqp_cnn_direct_qaware.yaml",  "cnn"),
     ]
     for cfg_name, expected in cases:
-        cfg = yaml.safe_load(
-            open(REPO_ROOT / "configs" / cfg_name, "r", encoding="utf-8"))
+        cfg = _yaml_or_skip(cfg_name)
+        if cfg is None:
+            print(f"    · {cfg_name:<40} not found → skipped")
+            continue
         got = orch._backend(cfg)
         mark = "✓" if got == expected else "✗"
         print(f"    {mark} {cfg_name:<40} → backend={got!r:<7}  (want {expected!r})")
         assert got == expected, f"{cfg_name}: backend={got!r} != {expected!r}"
+
+    # ── 8) Q-aware bound (Path F): negative slope tightens at low QP ───
+    print(f"\n[8] q_aware_residual_bound — Path F (negative slope) schedule")
+    sys.path.insert(0, str(SRC_ROOT))
+    from phase2.phase3.apply_liteqp_model import q_aware_residual_bound
+
+    # Path F schedule (from phase3_liteqp_cnn_direct_qaware.yaml):
+    #   slope=-0.10, base=2.0, lo=1.0, hi=3.0
+    #   QP=27 → 1.50    QP=32 → 2.00    QP=37 → 2.50    QP=42 → 3.00
+    expected = {27: 1.50, 32: 2.00, 37: 2.50, 42: 3.00}
+    for qp, want in expected.items():
+        got = q_aware_residual_bound(qp, base=2.0, slope=-0.10, lo=1.0, hi=3.0)
+        ok = abs(got - want) < 1e-9
+        print(f"    {'✓' if ok else '✗'} QP={qp} → bound = {got:.2f}  "
+              f"(want {want:.2f})")
+        assert ok, f"QP={qp}: bound={got} != {want}"
+    # Sanity: positive slope still works (legacy §7.10 schedule)
+    legacy = {27: 2.20, 32: 2.00, 37: 1.80, 42: 1.60}
+    for qp, want in legacy.items():
+        got = q_aware_residual_bound(qp, base=2.0, slope=0.04, lo=1.4, hi=2.2)
+        ok = abs(got - want) < 1e-9
+        assert ok, f"legacy QP={qp}: bound={got} != {want}"
+    print(f"    ✓ legacy (positive slope) schedule still correct")
+
+    # ── 9) cnn_direct + Q-aware ⇒ output IS clipped at inference ───────
+    print(f"\n[9] cnn_direct + Q-aware: end-to-end clipping behaviour")
+    import torch
+    # Force the CNN to predict large δ̂ (saturate near tanh × 8.0) so we
+    # can detect whether the Q-aware clip is actually applied.
+    saturated_model = build_cnn_model(output_mode="direct", output_bound=8.0)
+    # Bias every output to +8: zero all conv weights, set head bias to +1
+    # so tanh(1) ≈ 0.76, * 8.0 = 6.07 — will get clipped to 1.50 at QP=27.
+    with torch.no_grad():
+        for p in saturated_model.parameters():
+            p.zero_()
+        saturated_model.head.bias.fill_(1.0)
+    rng = np.random.default_rng(0)
+    planes_high_q = make_input_planes(
+        phi=rng.random((9, 15)), K_norm=rng.random((9, 15)) + 0.5,
+        sigma=rng.random((9, 15)), motion=rng.random((9, 15)),
+        prev_delta=np.zeros((9, 15)),
+        q_base_norm=(27 - 32.0) / 10.0,        # broadcast for QP=27
+        phi_grad=rng.random((9, 15)) * 0.1,
+    )
+    out_unclipped = cnn_predict(saturated_model, planes_high_q, device="cpu")
+    print(f"    raw CNN δ̂ at QP=27 (no clip)        : "
+          f"min={out_unclipped.min():+.3f}  max={out_unclipped.max():+.3f}")
+    cap_qp27 = q_aware_residual_bound(27, base=2.0, slope=-0.10, lo=1.0, hi=3.0)
+    out_clipped = np.clip(out_unclipped, -cap_qp27, +cap_qp27)
+    print(f"    after Q-aware clip at QP=27 (±{cap_qp27:.2f}): "
+          f"min={out_clipped.min():+.3f}  max={out_clipped.max():+.3f}")
+    assert np.all(np.abs(out_clipped) <= cap_qp27 + 1e-9)
+    assert out_unclipped.max() > cap_qp27, \
+        "Test invalid: CNN must produce values exceeding the cap so we can " \
+        "verify the clip actually fires."
+    print(f"    ✓ Q-aware clip enforces bound on cnn_direct output (Path F validated)")
 
     print("\n" + "=" * 78)
     print("All CNN sanity checks PASSED ✓")

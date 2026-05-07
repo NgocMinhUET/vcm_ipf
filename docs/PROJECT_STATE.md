@@ -946,6 +946,128 @@ python scripts/compare_pilots.py \
     ~/Minh/ipf/phase2_outputs/pilot_v8b/experiment_summary.json
 ```
 
+### 7.16 Pilot v8 verdict + Action 6 (Path F) — Q-aware clip on CNN-direct
+
+**pilot_v8a (CNN-residual) and pilot_v8b (CNN-direct) results** (server, 2026-05-07):
+
+| Pilot | Avg BD-Rate-Task | Win-tally (12 cells) | vs pilot_v4 |
+|---|---:|---:|---:|
+| pilot_v4 (MLP+A+) | −8.60 % | 7/12 | baseline |
+| pilot_v8a (CNN+A+) | +4.97 % | 4/12 | **+13.58 pp regression** |
+| **pilot_v8b (CNN, no A+)** | **−8.63 %** | **8/12** | **−0.02 pp ≈ tied avg, more cells won** |
+
+**Per-sequence breakdown** (negative = better):
+
+| Seq | pilot_v4 | pilot_v8a | pilot_v8b |
+|---|---:|---:|---:|
+| MOT17-04 | −4.28 % | +4.60 % | −4.70 % |
+| MOT17-09 | **−13.72 %** | −2.37 % | **+2.06 %** ← weak spot |
+| MOT17-02 | −7.82 % | +12.70 % | **−23.24 %** ← huge win |
+
+**§7.15 criteria result**:
+1. PASS ✓ (v8b's −8.63 % matches v4's −8.60 % on average)
+2. FAIL ✗ (v8a regresses on all 3, v8b regresses on MOT17-09 only)
+3. FAIL ✗ (avg BD never reaches −12 %)
+
+**Headline ablation finding** (publishable as a clean negative result):
+
+| Δ | Value | Interpretation |
+|---|---:|---|
+| `Δ(v8a − v4)` | +13.58 pp | Replacing MLP with CNN **on top of** A+ prior is harmful |
+| **`Δ(v8b − v8a)`** | **−13.60 pp** | **Removing A+ prior** entirely **recovers** all the lost performance |
+| `Δ(v8b − v4)` | −0.02 pp | End-to-end CNN ≈ MLP+A+ on average (but Pareto-better) |
+
+The analytic A+ prior is **incompatible with a spatial CNN**: the CNN's
+neighbour-aware predictions are constrained by A+'s pointwise pattern and
+they fight each other. Per-CTU MLP, lacking spatial structure, never had
+this conflict.
+
+**Root-cause diagnosis of v8b's MOT17-09 regression** (per-cell):
+
+| QP | M0 mAP | v8b M4 mAP | ΔmAP | Interpretation |
+|---:|---:|---:|---:|---|
+| 27 | 0.797 | **0.763** | **−0.034** | over-aggressive: redistribution at high quality hurts |
+| 32 | 0.746 | 0.769 | +0.023 | win |
+| 37 | 0.719 | 0.714 | −0.005 | marginal |
+| 42 | 0.594 | 0.638 | +0.044 | win at the cliff |
+
+The regression is at **QP=27**, *not* at the cliff. The CNN over-redistributes
+where M0 already has spare bits → −0.034 mAP for ~1 % rate save. This is
+the classic "redistribute when you shouldn't" failure mode.
+
+### Action 6 = Path F: Q-aware clip on cnn_direct (READY, NOT YET ENCODED)
+
+**Hypothesis**: Tighten the CNN's δ̂ output at low QP, where redistribution
+shouldn't happen. Same trained CNN bundle (deterministic seed) — only the
+inference clipping changes.
+
+**Schedule** (`slope=-0.10, base=2.0, lo=1.0, hi=3.0`):
+
+| QP | δ̂ bound | Comment |
+|---:|---:|---|
+| 27 | ±1.50 | tighten — force conservative redistribution at high quality |
+| 32 | ±2.00 | match v5d / v8b (control point) |
+| 37 | ±2.50 | normal |
+| 42 | ±3.00 | preserve v8b's +0.044 mAP gain at the cliff |
+
+**Code change** (committed):
+- `apply_liteqp_model.py`: `q_aware_residual_bound` docstring updated to
+  document negative-slope use-case; `cnn_direct` apply branch now
+  honours `--q-aware-bound` to clip the full δ̂ output (not just MLP residuals).
+- `phase3_liteqp_cnn_direct_qaware.yaml`: new config (`version: "v5dq"`)
+  with `apply.q_aware_bound.enabled: true` and the negative-slope schedule.
+- `pilot_v9.yaml`: encodes M0 vs `liteqp_v5dq_*`.
+- `sanity_check_phase3_cnn.py`: now 9 tests; tests 8–9 verify the new
+  schedule + saturated-CNN clipping behaviour. All 9 PASS locally.
+
+**Pre-registered §7.16 success criteria for pilot_v9**:
+
+1. **MOT17-09 BD-Rate-Task ≤ −10 %** (currently +2.06 % in v8b) ← primary
+2. **MOT17-02 BD-Rate-Task ≤ −15 %** (currently −23.24 %; small loss OK)
+3. **MOT17-04 BD-Rate-Task ≤ −2 %**  (currently −4.70 %; small loss OK)
+4. **Avg BD-Rate-Task ≤ −12 %**       (currently −8.63 %)
+
+If criterion 1 passes → Path F validated, write paper with v9 as final.
+If criterion 1 fails → escalate to **Path D** (expand training set to
+6 sequences: MOT17-02/04/05/09/10/11 or 13). MOT17-09's regression is
+then a generalisation issue, not a redistribution-aggression issue.
+
+**Run sequence on server** (~14 h encode):
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# 0) Local CNN sanity check (~20s; 9/9 PASS expected)
+PYTHONPATH=src python scripts/sanity_check_phase3_cnn.py
+
+# 1) Build → train (CNN, deterministic, identical to v8b weights)
+#    + apply with Q-aware clip
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_cnn_direct_qaware.yaml --start-step 3
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_v5dq_*/M4/
+
+# Quick eyeball: bound schedule should appear in apply log
+grep "residual bound" ~/Minh/ipf/phase3_outputs/learned/liteqp_v5dq_*/M4/*.log 2>&1 | head
+
+# 2) Encode pilot_v9
+bash scripts/run_pilot.sh configs/pilot_v9.yaml
+
+# 3) Compare with v4 (MLP baseline) and v8b (CNN-direct baseline)
+python scripts/compare_pilots.py \
+    ~/Minh/ipf/phase2_outputs/pilot_v4/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v8b/experiment_summary.json \
+    ~/Minh/ipf/phase2_outputs/pilot_v9/experiment_summary.json
+```
+
+**Decision tree on pilot_v9 outcome**:
+
+| Outcome | Interpretation | Next |
+|---|---|---|
+| All 4 ✓ | Path F solves it; v9 is the final method | Stop. Top-venue paper. |
+| (1) ✓ but (4) ✗ | MOT17-09 fixed, others slightly worse but acceptable | Stop or run 1 fine-tuning pilot |
+| (1) ✗ but no large regression elsewhere | Path F not strong enough — issue is elsewhere | Path D (expand sequences) |
+| (1) ✗ AND large regression | Path F broke things | Re-tune slope (−0.05 instead of −0.10), or revert to v8b |
+
 ---
 
 ## 8. Standing Instructions

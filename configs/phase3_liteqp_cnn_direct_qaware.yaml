@@ -1,0 +1,107 @@
+# =============================================================================
+# Phase 3 Stage C v5dq — LiteQP-CNN DIRECT + Q-aware bound (Path F)
+# =============================================================================
+# Action 6 (PROJECT_STATE §7.16). pilot_v8b (CNN-direct, no A+ prior)
+# matched pilot_v4 on average BD-Rate-Task (−8.63 % vs −8.60 %) and won
+# more Pareto cells (8/12 vs 7/12), but regressed on MOT17-09 by
+# +15.78 pp. Per-cell diagnosis: at QP=27, the CNN over-redistributes
+# bits where M0 already has plenty, hurting mAP by 0.034 for ~1 % rate
+# saving — the classic "redistribute when you shouldn't" failure mode.
+#
+# Path F: enable q_aware_bound with **negative slope** so the bound is
+# TIGHTER at low QP, looser at high QP. Same trained CNN, different
+# inference clipping. Tests the hypothesis cleanly.
+#
+# Bound schedule (slope=-0.10, base=2.0, lo=1.0, hi=3.0):
+#     QP=27 → 1.50    QP=32 → 2.00    QP=37 → 2.50    QP=42 → 3.00
+#
+# Rationale for these constants:
+#   - QP=27 → 1.50: forces conservative redistribution at high quality
+#   - QP=32 → 2.00: matches v5d (no change at the median QP)
+#   - QP=37 → 2.50: allow CNN's spatial reallocation to operate normally
+#   - QP=42 → 3.00: preserve the +0.044 gain v8b already achieves
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v5dq"
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0
+
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+teacher_overrides: {}
+auto_lambda:
+  enabled: false
+
+train:
+  backend:      "cnn"
+  output_mode:  "direct"   # same as v5d → identical bundle weights (deterministic seed)
+  output_bound: 8.0
+
+  epochs:       100
+  batch_size:   16
+  lr:           0.001
+  weight_decay: 0.0001
+  device:       "cuda:0"
+  seed:         20260506
+
+  huber_delta:  0.5
+  alpha_rnp:    0.10
+  alpha_tv:     0.005
+  alpha_bound:  0.10
+  delta_max:    8.0
+
+  cv:               "both"
+  n_bootstrap:      500
+  bootstrap_alpha:  0.05
+
+apply:
+  device: "cuda:0"
+
+  # ── KEY CHANGE vs v5d ──────────────────────────────────────────────────────
+  # negative slope → tighter at low QP (Path F)
+  q_aware_bound:
+    enabled: true
+    slope:  -0.10        # ← NEGATIVE: tightens at low QP, loosens at high QP
+    lo:      1.0
+    hi:      3.0
+    # Computed: QP=27→1.50  QP=32→2.00  QP=37→2.50  QP=42→3.00
