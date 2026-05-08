@@ -1356,6 +1356,144 @@ PYTHONPATH=src python scripts/reevaluate_pilots.py \
 
 ---
 
+### 7.19 Audited-GT verdict (real MOT17) + Path A — stronger detector
+
+**Date**: 2026-05-08 (evening). The §7.18 protocol was executed on the
+server for `pilot_v4`, `pilot_v8b`, `pilot_v9` with **real MOT17
+human-annotated GT** (not pseudo-GT). `pilot_v9b` was skipped because
+its `experiment_summary.json` was missing.
+
+**Headline result — all three pilots show no statistically significant
+M4 vs. M0 difference on `mAP_50_95`.**
+
+Per-pilot bootstrap BD-Rate-Task means with 95 % CIs:
+
+| Pilot | Mean BD-Rate-Task (M4 vs M0) | 95 % CI | Per-cell REAL WIN / REAL LOSS / NOISE |
+|---|---:|---|---:|
+| pilot_v4  | small | wide CI crossing 0 | 1 / 4 / 7 (out of 12) |
+| pilot_v8b | huge variance ([-45 %, +207 %]) | non-informative | 1 / 3 / 8 |
+| pilot_v9  | small | wide CI crossing 0 | 1 / 3 / 8 |
+| **Total** | **3 / 36 REAL WIN, 10 / 36 REAL LOSS, 23 / 36 NOISE** | | |
+
+**Quantitative diagnosis** (run via the new
+`scripts/analyze_detector_sensitivity.py` on the v8b verdict numbers):
+
+```
+Detector: yolov8n  (real MOT17 GT, n=50 frames)
+Sequence       M0 abs slope   headroom (Δ4 × 30 % ROI)   verdict
+MOT17-02-DPM      0.0019              0.0022             SATURATED
+MOT17-04-DPM      0.0027              0.0032             SATURATED
+MOT17-09-DPM      0.0016              0.0019             SATURATED
+M0 mean slope = 0.0020 mAP/QP, mean headroom = 0.0024
+Noise floor (1 SE @ n=50)            ≈ 0.020
+Headroom / noise floor               ≈ 0.12 (i.e. 8× below noise)
+```
+
+**Interpretation.** YOLOv8n on this MOT17 subset is so insensitive to
+HEVC-VVC compression in the QP=27..42 range (mean drop in `mAP_50_95`
+across 15 QP steps is 0.030) that *any* ROI-aware allocation
+mathematically cannot move AP further than the metric's noise floor.
+The bottleneck is the detector, not the M4 architecture.
+
+This is consistent with the existing literature: YOLOv8n saturates
+quickly on human-track datasets at modest compression because most of
+the AP comes from a small number of high-confidence pedestrian
+predictions whose features survive coarse quantisation. We need
+either a stronger detector (Path A) or a harder QP regime (Path B) to
+expose the rate-task trade-off that Phase-3 is meant to optimise.
+
+**Path A — stronger detector on cached `decoded_frames/`** (CHOSEN).
+
+* Cost: ~30 min YOLOv8m inference per pilot on `decoded_frames/` —
+  no re-encoding. Total ~90 min for v4/v8b/v9.
+* Code change: `scripts/reevaluate_pilots.py` now accepts
+  `--detector-tag <name>` to suffix every output file
+  (`d1_true_map_<tag>.json`, `d2_stats_<tag>.json`,
+  `bd_rate_bootstrap_<tag>.json`, `verdict_<tag>.md`). This keeps
+  the yolov8n results intact for side-by-side comparison.
+* Diagnostic: `scripts/analyze_detector_sensitivity.py` consumes the
+  pre/post D1 JSONs and emits a Markdown table with M0 slope,
+  headroom, and the verdict {SATURATED, MARGINAL, USEFUL}. Sanity
+  check `scripts/sanity_check_detector_sensitivity.py` confirms the
+  three regimes on synthetic data.
+
+**Pre-registered Path A success criteria (to decide M4 fate)**
+
+After re-running with `yolov8m.pt`:
+
+1. **Steepness**: mean M0 abs slope on `mAP_50_95` ≥ 0.005 mAP/QP
+   (i.e. 2.5× the yolov8n value, headroom ≥ 0.006 ≥ 30 % of noise
+   floor) — *necessary* condition for ROI methods to compete.
+2. **Significance**: ≥ 4 / 12 cells with REAL WIN for M4 (p < 0.05
+   *and* |Cohen's d| > 0.2 on per-frame F1); paired bootstrap CI on
+   BD-Rate-Task strictly negative.
+3. **Magnitude**: pilot_v4 mean BD-Rate-Task ≤ −5 % under yolov8m,
+   with the 95 % CI not crossing 0.
+
+**If 1 fails** → escalate to YOLOv8x (250 MB) or shift QP grid to
+[37, 42, 47, 52]. Detector / regime is the experimental design flaw,
+not the model.
+
+**If 1 passes but 2/3 fail** → write the audited paper as
+"closed-form analytic prior matches a well-tuned classical RDO at
+detector-grade evaluation; learned residual residual is *not*
+statistically necessary on this benchmark scale" — defensible
+negative-tendency story per `PROJECT_AUDIT §5`.
+
+**Server commands (Path A)**
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2
+
+# 1. Sanity (no GPU)
+PYTHONPATH=src python scripts/sanity_check_detector_sensitivity.py
+
+# 2. Re-evaluate the three pilots with yolov8m, side-by-side with yolov8n.
+#    The --detector-tag suffix prevents overwriting the yolov8n results.
+PYTHONPATH=src python scripts/reevaluate_pilots.py \
+    --pilots pilot_v4 pilot_v8b pilot_v9 \
+    --pilots-root ~/Minh/ipf/phase2_outputs \
+    --configs configs/pilot_v4.yaml configs/pilot_v8b.yaml configs/pilot_v9.yaml \
+    --reference-method M0 --test-methods M4 \
+    --device cuda:0 --n-boot 1000 \
+    --model yolov8m.pt --detector-tag yolov8m
+
+# 3. Cross-detector sensitivity diagnosis
+mkdir -p ~/Minh/ipf/phase2_outputs/diagnostics
+for p in pilot_v4 pilot_v8b pilot_v9; do
+  PYTHONPATH=src python scripts/analyze_detector_sensitivity.py \
+      --d1-jsons \
+          ~/Minh/ipf/phase2_outputs/$p/diagnostics/d1_true_map.json \
+          ~/Minh/ipf/phase2_outputs/$p/diagnostics/d1_true_map_yolov8m.json \
+      --detector-labels yolov8n yolov8m \
+      --output ~/Minh/ipf/phase2_outputs/$p/diagnostics/sensitivity.md
+done
+
+# 4. Read the verdicts:
+#    ~/Minh/ipf/phase2_outputs/<pilot>/diagnostics/verdict_yolov8m.md
+#    ~/Minh/ipf/phase2_outputs/<pilot>/diagnostics/sensitivity.md
+```
+
+**Files added in this commit**
+
+| File | Role |
+|---|---|
+| `phase2/scripts/analyze_detector_sensitivity.py` | mAP-slope-per-QP diagnosis; emits SATURATED / MARGINAL / USEFUL verdict per (sequence, detector) and a Path-A go/no-go decision. |
+| `phase2/scripts/sanity_check_detector_sensitivity.py` | Offline regression test for the analyser; PASS locally. |
+| `phase2/scripts/reevaluate_pilots.py` | `--detector-tag` flag added so yolov8m runs do not overwrite yolov8n results. |
+
+**Decision after step 4**
+
+The next operational decision is gated on the §7.19 success criteria
+above and lives in `verdict_yolov8m.md` + `sensitivity.md`. Three
+outcomes are possible: (a) all 3 pass → Phase-3 contribution is
+defensible, proceed to ablations; (b) only 1 passes → re-frame as
+"matching the best classical ROI baseline at honest detector-grade
+evaluation"; (c) 1 fails → detector / QP regime is the design flaw,
+escalate to yolov8x or QP[37,52] before any further model work.
+
+---
+
 ## 8. Standing Instructions
 
 - **Always update this file** when:

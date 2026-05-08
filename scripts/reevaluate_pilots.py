@@ -309,6 +309,14 @@ def main() -> None:
         "--min-visibility", type=float, default=0.0,
         help="With --gt-source mot17, drop GT boxes with visibility below this.",
     )
+    ap.add_argument(
+        "--detector-tag", default="",
+        help="Optional suffix appended to every output filename "
+             "(d1_true_map_<tag>.json, d2_stats_<tag>.json, "
+             "bd_rate_bootstrap_<tag>.json, verdict_<tag>.md). Use this "
+             "to keep results from different detectors side-by-side, "
+             "e.g. --detector-tag yolov8m.",
+    )
     ap.add_argument("--skip-d1", action="store_true",
                     help="Re-use existing d1_true_map.json")
     ap.add_argument("--skip-d2", action="store_true")
@@ -348,10 +356,11 @@ def main() -> None:
 
         diag_dir  = pilot_dir / "diagnostics"
         _ensure_dir(diag_dir)
-        d1_out = diag_dir / "d1_true_map.json"
-        d2_out = diag_dir / "d2_stats.json"
-        bd_out = diag_dir / "bd_rate_bootstrap.json"
-        verdict_out = diag_dir / "verdict.md"
+        suffix = f"_{args.detector_tag}" if args.detector_tag else ""
+        d1_out = diag_dir / f"d1_true_map{suffix}.json"
+        d2_out = diag_dir / f"d2_stats{suffix}.json"
+        bd_out = diag_dir / f"bd_rate_bootstrap{suffix}.json"
+        verdict_out = diag_dir / f"verdict{suffix}.md"
 
         if not args.skip_d1:
             rc = run_d1(pilot_dir, Path(cfg), d1_out,
