@@ -81,6 +81,7 @@ def run_d1(
     pilot_dir: Path, config: Path, output: Path,
     model: str, conf_low: float, classes: List[int],
     device: str, dry: bool,
+    gt_source: str = "mot17", min_visibility: float = 0.0,
 ) -> int:
     cmd = [
         sys.executable, "-m", "phase2.diagnostics.d1_true_map",
@@ -90,6 +91,8 @@ def run_d1(
         "--model", model,
         "--conf-low", str(conf_low),
         "--device", device,
+        "--gt-source", gt_source,
+        "--min-visibility", str(min_visibility),
     ]
     cmd += ["--classes", *map(str, classes)]
     return _run(cmd, dry)
@@ -298,6 +301,14 @@ def main() -> None:
     ap.add_argument("--n-boot", type=int, default=1000)
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--gt-source", choices=("mot17", "pseudo"), default="mot17",
+        help="Ground-truth source for D1 (default: real MOT17 annotations).",
+    )
+    ap.add_argument(
+        "--min-visibility", type=float, default=0.0,
+        help="With --gt-source mot17, drop GT boxes with visibility below this.",
+    )
     ap.add_argument("--skip-d1", action="store_true",
                     help="Re-use existing d1_true_map.json")
     ap.add_argument("--skip-d2", action="store_true")
@@ -331,7 +342,9 @@ def main() -> None:
         if not args.skip_d1:
             rc = run_d1(pilot_dir, Path(cfg), d1_out,
                         args.model, args.conf_low, args.classes,
-                        args.device, args.dry_run)
+                        args.device, args.dry_run,
+                        gt_source=args.gt_source,
+                        min_visibility=args.min_visibility)
             if rc != 0:
                 logger.error("D1 failed for %s (exit %d) — skipping rest", pilot, rc)
                 rc_total |= rc

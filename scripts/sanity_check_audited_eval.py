@@ -302,6 +302,46 @@ def _synthetic_cells(method: str, qp_offsets: List[int], rate_scale: float = 1.0
     return cells
 
 
+def test_mot17_gt_loader() -> bool:
+    """Synthesise a tiny MOT17-style gt.txt and verify the loader returns
+    DetectionResult-compatible objects with active-only, person-only filtering.
+    """
+    from phase2.evaluation.mot17_gt import (
+        load_mot17_gt_for_sequence,
+        MOT17_PEDESTRIAN_CLASS,
+    )
+    with tempfile.TemporaryDirectory() as td:
+        seq_root = Path(td) / "MOT17-04-DPM"
+        (seq_root / "gt").mkdir(parents=True)
+        gt_path = seq_root / "gt" / "gt.txt"
+        # Frame 1: 2 active person boxes, 1 inactive (conf=0), 1 wrong class
+        # Frame 2: 1 person, low visibility
+        gt_path.write_text(
+            "1,1,100,200,50,80,1,1,1.0\n"
+            "1,2,300,400,60,90,1,1,0.9\n"
+            "1,3,500,500,40,70,0,1,1.0\n"        # ignored: conf=0
+            "1,4,700,200,30,60,1,7,1.0\n"        # ignored: class!=1
+            "2,1,150,250,55,85,1,1,0.20\n"       # low visibility
+            "3,1,200,300,40,60,1,1,0.95\n",      # not in first 2 frames
+            encoding="utf-8",
+        )
+        # Default min_visibility=0.0 → frame 2 box is kept
+        gt = load_mot17_gt_for_sequence(seq_root, n_frames=2)
+        ok1 = (len(gt) == 2 and gt[0].n_detections == 2 and gt[1].n_detections == 1)
+        # min_visibility=0.5 → frame 2 box is dropped
+        gt2 = load_mot17_gt_for_sequence(seq_root, n_frames=2, min_visibility=0.5)
+        ok2 = (gt2[1].n_detections == 0 and gt2[0].n_detections == 2)
+        # Boxes in xyxy
+        b0 = gt[0].boxes[0]
+        ok3 = abs(b0[0] - 100) < 1e-6 and abs(b0[2] - 150) < 1e-6
+    return _check(
+        "MOT17 GT loader — active filter, class filter, visibility filter",
+        ok1 and ok2 and ok3,
+        f"frame_counts={[d.n_detections for d in gt]}, "
+        f"vis>=0.5_counts={[d.n_detections for d in gt2]}",
+    )
+
+
 def test_paired_bootstrap() -> bool:
     cells_by_method = {
         "M0": _synthetic_cells("M0", [0, 0, 0, 0], rate_scale=1.0),
@@ -343,6 +383,7 @@ TESTS = [
     test_bd_rate_basic,
     test_bd_rate_zero_when_equal,
     test_bd_rate_handles_duplicate_quality,
+    test_mot17_gt_loader,
     test_paired_bootstrap,
 ]
 

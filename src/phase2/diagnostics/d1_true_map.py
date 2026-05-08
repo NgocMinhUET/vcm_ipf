@@ -357,6 +357,20 @@ class CellResult:
     per_frame_counts: List[List[int]] = field(default_factory=list)  # [[tp, fp, fn], ...]
 
 
+def detections_from_dataclass_list(dets) -> List[FrameDetections]:
+    """Convert a list of ``task_accuracy.DetectionResult`` (or any object
+    with ``boxes/scores/classes`` attributes) into D1's ``FrameDetections``
+    representation. Used to bridge MOT17 GT and the COCO mAP routine.
+    """
+    out: List[FrameDetections] = []
+    for d in dets:
+        boxes = np.asarray(getattr(d, "boxes", []) or [], dtype=np.float32).reshape(-1, 4)
+        scores = np.asarray(getattr(d, "scores", []) or [], dtype=np.float32)
+        classes = np.asarray(getattr(d, "classes", []) or [], dtype=np.int32)
+        out.append(FrameDetections(boxes=boxes, scores=scores, classes=classes))
+    return out
+
+
 def _load_cached_detections(json_path: Path) -> Optional[List[FrameDetections]]:
     """If a cached detections JSON exists (written by the new task_accuracy.py),
     load it directly to skip the slow YOLO re-detect step.
@@ -388,6 +402,7 @@ def evaluate_run(
     n_frames: int,
     cached_pred_path: Optional[Path] = None,
     cached_ref_path: Optional[Path] = None,
+    real_gt: Optional[List["FrameDetections"]] = None,
 ) -> Tuple[Dict[str, float], float, List[Tuple[int, int, int]]]:
     """Detect (or load cached) → compute true mAP + legacy P×R + per-frame counts.
 
@@ -405,14 +420,24 @@ def evaluate_run(
         pred_dets = detect_directory(
             decoded_frames_dir, model_name, conf_low, device, n_frames,
         )
-    ref_dets = (
-        _load_cached_detections(cached_ref_path) if cached_ref_path is not None
-        else None
-    )
-    if ref_dets is None:
-        ref_dets = detect_directory(
-            reference_frames_dir, model_name, conf_low, device, n_frames,
+
+    # Pick the GT source. Real MOT17 annotations (``real_gt``) take precedence
+    # over YOLO-pseudo-GT because they are human-labelled and free of
+    # detector noise. Pseudo-GT remains a fallback for sequences without
+    # real annotations (e.g. external test data).
+    if real_gt is not None:
+        # MOT17 frame_idx is 0-based after our loader; align by length
+        ref_dets = real_gt
+    else:
+        ref_dets = (
+            _load_cached_detections(cached_ref_path) if cached_ref_path is not None
+            else None
         )
+        if ref_dets is None:
+            ref_dets = detect_directory(
+                reference_frames_dir, model_name, conf_low, device, n_frames,
+            )
+
     n_use = min(len(pred_dets), len(ref_dets))
     pred_dets = pred_dets[:n_use]; ref_dets = ref_dets[:n_use]
     coco = compute_coco_map(pred_dets, ref_dets, classes_of_interest)
@@ -434,14 +459,25 @@ def reevaluate_pilot(
     device: str = "cuda:0",
     only_methods: Optional[List[str]] = None,
     only_sequences: Optional[List[str]] = None,
+    gt_source: str = "mot17",
+    min_visibility: float = 0.0,
 ) -> List[CellResult]:
-    """Iterate every run in a pilot directory and re-score with true mAP."""
+    """Iterate every run in a pilot directory and re-score with true mAP.
+
+    ``gt_source`` selects the ground-truth strategy:
+
+    * ``"mot17"`` (default, recommended) — load human-annotated boxes from
+      ``<frames_dir parent>/gt/gt.txt`` per MOT17 convention. This is the
+      scientifically defensible option.
+    * ``"pseudo"`` — fall back to YOLO detection on the uncompressed
+      reference frames. Reproduces the legacy pipeline; carries the
+      pseudo-GT bias documented in PROJECT_AUDIT §1.5 #4.
+    """
     summary_path = pilot_dir / "experiment_summary.json"
     if not summary_path.exists():
         raise FileNotFoundError(f"experiment_summary.json missing at {summary_path}")
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
-    # Lazily resolve sequence frames-dir from config
     from phase2.core.config import load_phase2_config
     cfg = load_phase2_config(str(config_path))
     seq_to_frames: Dict[str, Path] = {}
@@ -450,6 +486,25 @@ def reevaluate_pilot(
         if s.frames_dir:
             seq_to_frames[s.name] = Path(s.frames_dir).expanduser().resolve()
             seq_to_n_frames[s.name] = int(s.n_frames)
+
+    # Load real MOT17 GT once per sequence (same n_frames across runs).
+    gt_cache: Dict[str, List[FrameDetections]] = {}
+    if gt_source == "mot17":
+        from phase2.evaluation.mot17_gt import (
+            load_mot17_gt_for_sequence,
+            derive_sequence_root_from_frames_dir,
+        )
+        for seq_name, frames_dir in seq_to_frames.items():
+            seq_root = derive_sequence_root_from_frames_dir(frames_dir)
+            try:
+                gt_dr = load_mot17_gt_for_sequence(
+                    seq_root, n_frames=seq_to_n_frames[seq_name],
+                    min_visibility=min_visibility, require_active=True,
+                )
+                gt_cache[seq_name] = detections_from_dataclass_list(gt_dr)
+            except FileNotFoundError as exc:
+                logger.warning("MOT17 GT missing for %s: %s — falling back to pseudo-GT",
+                               seq_name, exc)
 
     cells: List[CellResult] = []
     for entry in summary["results"]:
@@ -483,12 +538,18 @@ def reevaluate_pilot(
                 run_id, "yes" if cached_pred_arg else "no",
                 "yes" if cached_ref_arg else "no",
             )
-        logger.info("[%s] true-mAP re-eval (n_frames=%d)", run_id, n_frames)
+        real_gt = gt_cache.get(seq_name)
+        logger.info(
+            "[%s] true-mAP re-eval (n_frames=%d, gt_source=%s)",
+            run_id, n_frames,
+            "mot17_real" if real_gt is not None else "pseudo_yolo",
+        )
         coco, pxr, per_frame = evaluate_run(
             decoded_dir, ref_dir, model_name, conf_low, device,
             classes_of_interest, n_frames,
             cached_pred_path=cached_pred_arg,
             cached_ref_path=cached_ref_arg,
+            real_gt=real_gt,
         )
         cells.append(CellResult(
             sequence=seq_name, method=method, qp_base=qp_base,
@@ -530,6 +591,18 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--methods", nargs="*", default=None)
     parser.add_argument("--sequences", nargs="*", default=None)
+    parser.add_argument(
+        "--gt-source", choices=("mot17", "pseudo"), default="mot17",
+        help="Ground-truth source. 'mot17' = real human annotations from "
+             "gt/gt.txt (recommended). 'pseudo' = YOLO on uncompressed "
+             "reference frames (legacy; carries detector-noise bias).",
+    )
+    parser.add_argument(
+        "--min-visibility", type=float, default=0.0,
+        help="When --gt-source mot17, drop annotations with visibility "
+             "below this. 0.0 keeps everything; 0.3 is a common stricter "
+             "MOT-evaluation choice.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -555,6 +628,8 @@ def main() -> None:
         device=args.device,
         only_methods=args.methods,
         only_sequences=args.sequences,
+        gt_source=args.gt_source,
+        min_visibility=args.min_visibility,
     )
 
 
