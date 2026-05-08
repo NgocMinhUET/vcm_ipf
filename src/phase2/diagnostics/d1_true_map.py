@@ -357,6 +357,27 @@ class CellResult:
     per_frame_counts: List[List[int]] = field(default_factory=list)  # [[tp, fp, fn], ...]
 
 
+def _load_cached_detections(json_path: Path) -> Optional[List[FrameDetections]]:
+    """If a cached detections JSON exists (written by the new task_accuracy.py),
+    load it directly to skip the slow YOLO re-detect step.
+
+    Returns ``None`` if the file is missing or unreadable.
+    """
+    if not json_path.exists():
+        return None
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    out: List[FrameDetections] = []
+    for d in raw:
+        boxes = np.asarray(d.get("boxes", []), dtype=np.float32).reshape(-1, 4)
+        scores = np.asarray(d.get("scores", []), dtype=np.float32)
+        classes = np.asarray(d.get("classes", []), dtype=np.int32)
+        out.append(FrameDetections(boxes=boxes, scores=scores, classes=classes))
+    return out
+
+
 def evaluate_run(
     decoded_frames_dir: Path,
     reference_frames_dir: Path,
@@ -365,15 +386,38 @@ def evaluate_run(
     device: str,
     classes_of_interest: Optional[List[int]],
     n_frames: int,
+    cached_pred_path: Optional[Path] = None,
+    cached_ref_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, float], float, List[Tuple[int, int, int]]]:
-    """Detect → compute true mAP + legacy P×R + per-frame counts."""
-    pred_dets = detect_directory(decoded_frames_dir, model_name, conf_low, device, n_frames)
-    gt_dets = detect_directory(reference_frames_dir, model_name, conf_low, device, n_frames)
-    n_use = min(len(pred_dets), len(gt_dets))
-    pred_dets = pred_dets[:n_use]; gt_dets = gt_dets[:n_use]
-    coco = compute_coco_map(pred_dets, gt_dets, classes_of_interest)
+    """Detect (or load cached) → compute true mAP + legacy P×R + per-frame counts.
+
+    If ``cached_pred_path`` and/or ``cached_ref_path`` are provided and the
+    files exist (written by ``phase2.evaluation.task_accuracy`` during
+    encoding), the corresponding detection pass is loaded from disk instead
+    of re-running YOLO. This makes Phase-1 diagnostics run in seconds rather
+    than minutes for any pilot encoded under the new pipeline.
+    """
+    pred_dets = (
+        _load_cached_detections(cached_pred_path) if cached_pred_path is not None
+        else None
+    )
+    if pred_dets is None:
+        pred_dets = detect_directory(
+            decoded_frames_dir, model_name, conf_low, device, n_frames,
+        )
+    ref_dets = (
+        _load_cached_detections(cached_ref_path) if cached_ref_path is not None
+        else None
+    )
+    if ref_dets is None:
+        ref_dets = detect_directory(
+            reference_frames_dir, model_name, conf_low, device, n_frames,
+        )
+    n_use = min(len(pred_dets), len(ref_dets))
+    pred_dets = pred_dets[:n_use]; ref_dets = ref_dets[:n_use]
+    coco = compute_coco_map(pred_dets, ref_dets, classes_of_interest)
     pxr, per_frame = compute_pxr_at(
-        pred_dets, gt_dets,
+        pred_dets, ref_dets,
         iou_threshold=0.5, score_threshold=0.25,
         classes_of_interest=classes_of_interest,
     )
@@ -429,10 +473,22 @@ def reevaluate_pilot(
             continue
         n_frames = seq_to_n_frames.get(seq_name, 0)
 
+        cached_pred = run_dir / "detections_decoded.json"
+        cached_ref  = run_dir / "detections_reference.json"
+        cached_pred_arg = cached_pred if cached_pred.exists() else None
+        cached_ref_arg  = cached_ref  if cached_ref.exists()  else None
+        if cached_pred_arg or cached_ref_arg:
+            logger.info(
+                "[%s] using cached detections (pred=%s, ref=%s) → no YOLO re-detect",
+                run_id, "yes" if cached_pred_arg else "no",
+                "yes" if cached_ref_arg else "no",
+            )
         logger.info("[%s] true-mAP re-eval (n_frames=%d)", run_id, n_frames)
         coco, pxr, per_frame = evaluate_run(
             decoded_dir, ref_dir, model_name, conf_low, device,
             classes_of_interest, n_frames,
+            cached_pred_path=cached_pred_arg,
+            cached_ref_path=cached_ref_arg,
         )
         cells.append(CellResult(
             sequence=seq_name, method=method, qp_base=qp_base,

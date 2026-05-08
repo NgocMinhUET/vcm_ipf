@@ -78,7 +78,19 @@ class EvaluationConfig(BaseModel):
     compute_ssim: bool = Field(False, description="Compute SSIM (slower)")
     compute_task_accuracy: bool = Field(True, description="Run YOLOv8 on decoded frames")
     detector_model: str = Field("yolov8n.pt", description="YOLOv8 model for task eval")
-    detector_confidence: float = Field(0.25)
+    detector_confidence: float = Field(
+        0.25,
+        description="Operating-point confidence (used for legacy P×R + visible n_dets stats)",
+    )
+    detector_conf_low: float = Field(
+        0.001,
+        description="Low confidence threshold for COCO PR-curve sweep "
+                    "(must be ≤ detector_confidence; standard COCO uses 0.001)",
+    )
+    detector_classes: List[int] = Field(
+        default_factory=lambda: [0],
+        description="COCO class IDs to score (default: [0] = person, suits MOT)",
+    )
     detector_device: str = Field("cuda:0")
     roi_expansion: float = Field(
         0.1, description="Fractional expansion of GT boxes for ROI PSNR computation"

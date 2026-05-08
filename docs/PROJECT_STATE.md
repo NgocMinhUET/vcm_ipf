@@ -1244,6 +1244,118 @@ will be defined when we trigger it.
 
 ---
 
+### 7.18 Audited evaluation protocol — replaces P×R with real COCO mAP, adds bootstrap CI
+
+**Date**: 2026-05-08. **Driver**: user mandate "tôi không cần hỏi ý kiến ai cả.
+Bạn hãy cập nhật thật khoa học để làm sao tôi có được kết quả tốt, thuyết phục
+nhất đi" + the critical-severity scientific debts D1/D2/D6 in
+`docs/PROJECT_AUDIT.md`. The instability of `pilot_v4 → v9b` (BD-Rate-Task
+swings of ±15 pp under inference-time clip changes alone) is consistent with
+the audit's diagnosis that **the metric** and **the teacher** are
+scientifically wrong, not just the model. We address the metric in this
+commit; the teacher (η_emp via D4) is the next server experiment.
+
+**What changed in code**
+
+| File | Change |
+|---|---|
+| `phase2/src/phase2/evaluation/task_accuracy.py` | Replaced `precision × recall` masquerading as `mAP50` with **real COCO AP** (sorted PR-curve, 101-point interpolation per (class, IoU); IoU sweep 0.5:0.05:0.95). Legacy P×R retained as `pxr_50`. Detection now runs at `conf_low=0.001` so the PR curve has shape. Raw decoded + reference detections are persisted to `<run_dir>/detections_decoded.json` and `<run_dir>/detections_reference.json`. |
+| `phase2/src/phase2/pipeline/encode_pipeline.py` | Passes `save_dir=run_dir` to `compute_task_metrics`, persisting detections per run for later re-scoring without YOLO. |
+| `phase2/src/phase2/core/config.py` | Adds `evaluation.detector_conf_low` (default 0.001) and `evaluation.detector_classes` (default `[0]` = person). |
+| `phase2/src/phase2/diagnostics/d1_true_map.py` | Adds **fast-path**: if cached `detections_*.json` exist in the run dir, D1 loads them in <1 s and skips re-detection. For old pilots (no cache), falls back to the existing YOLO re-detect on `decoded_frames/`. |
+| `phase2/src/phase2/diagnostics/bd_rate_bootstrap.py` | NEW — `bd_rate_task_pchip` (point estimate via PCHIP-monotonised RD curves) and `paired_bootstrap_bd_rate` (resample per-frame TP/FP/FN counts produced by D1 to obtain a sampling distribution; reports mean / median / 95 % CI). The bootstrap is *paired* by (sequence, qp_base): the same frame indices are drawn for M0 and the test method on each iteration. |
+| `phase2/scripts/reevaluate_pilots.py` | NEW — orchestrator that runs D1 (true mAP) + D2 (Wilcoxon, Cohen's d, BCa CI on per-frame F1) + the new bootstrap BD-Rate-Task on each pilot, and renders a Markdown verdict combining all three. |
+| `phase2/scripts/sanity_check_audited_eval.py` | NEW — 10 offline tests (no GPU, synthetic detections) verifying the metric math, the cache path, BD-Rate point estimate, and the bootstrap CI ordering. **All 10 PASS locally**. |
+
+**Why the new numbers will differ from old `experiment_table.txt` rows**
+
+The legacy `mAP50` was `precision × recall` at conf=0.25, IoU=0.5. The new
+`mAP50` is real AP@0.5 from the full PR curve. Old pilot tables remain valid
+historical artefacts but should not be quoted in the paper without re-scoring.
+Re-scoring is cheap for any pilot encoded under the new pipeline (cache
+fast-path); old pilots need ≈10 min of YOLO on cached `decoded_frames/`.
+
+**Pre-registered acceptance criteria for the next pilot under the new metric**
+
+The next pilot — `pilot_v10_bench` — must satisfy *all* of:
+
+1. **Aggregate**: M4 (any LiteQP variant) beats M0 by ≥ 2× the average
+   bootstrap CI half-width on `mAP_50_95`, averaged over sequences.
+2. **Per-cell statistical wins**: ≥ 6/12 cells have D2 verdict
+   `REAL WIN` (paired Wilcoxon p < 0.05 *and* |Cohen's d| > 0.2 on per-frame
+   F1).
+3. **Pareto vs. classical baselines**: M4 beats the *best* of {M_rect, M1,
+   M5, M6} on average BD-Rate-Task by ≥ the bootstrap CI half-width — i.e.
+   we cannot just beat M0, we must beat the strongest hand-crafted ROI map.
+
+If any of (1)/(2)/(3) fails under the new metric, the honest paper writeup
+follows PROJECT_AUDIT §5: "the achievable headroom on this surveillance
+subset lies within the metric's noise floor", which is a defensible
+*negative-tendency* contribution rather than a contested gain.
+
+**Server commands (in order)**
+
+```bash
+# 0. Sync
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# 1. Local sanity (already PASSED on dev; rerun to confirm server env)
+PYTHONPATH=src python scripts/sanity_check_audited_eval.py
+# Expect: PASSED: 10 / 10
+
+# 2. Re-score every existing pilot under the new metric.
+#    (Old pilots have no cached detections → YOLO re-runs on decoded_frames/.)
+PYTHONPATH=src python scripts/reevaluate_pilots.py \
+    --pilots pilot_v4 pilot_v8b pilot_v9 pilot_v9b \
+    --pilots-root ~/Minh/ipf/phase2_outputs \
+    --configs configs/pilot_v4.yaml configs/pilot_v8b.yaml \
+              configs/pilot_v9.yaml  configs/pilot_v9b.yaml \
+    --reference-method M0 --test-methods M4 \
+    --device cuda:0 --n-boot 1000
+
+# Each pilot now has:
+#   <pilot>/diagnostics/d1_true_map.json
+#   <pilot>/diagnostics/d2_stats.json
+#   <pilot>/diagnostics/bd_rate_bootstrap.json
+#   <pilot>/diagnostics/verdict.md   ← read this
+
+# 3. Encode pilot_v10_bench (6-method head-to-head; 72 encodes, ~30 h):
+PYTHONPATH=src python scripts/prepare_pilot_v10_root.py \
+    --sequences MOT17-02-DPM MOT17-04-DPM MOT17-09-DPM \
+    --base-qps 27 32 37 42 \
+    --phase1-root ~/Minh/ipf/phase1_outputs --phase1-prefix multi_seq_ \
+    --phase3-root ~/Minh/ipf/phase3_outputs/learned --phase3-prefix liteqp_v5d_ \
+    --unified-root ~/Minh/ipf/pilot_v10_bench_root \
+    --reference-boxes-dir ~/Minh/ipf/phase2_outputs/pilot_v8b/_reference_boxes \
+    --frames-cap 50 --width 1920 --height 1152
+
+bash scripts/run_pilot.sh configs/pilot_v10_bench.yaml
+
+# 4. Audited verdict for v10_bench
+PYTHONPATH=src python scripts/reevaluate_pilots.py \
+    --pilots pilot_v10_bench \
+    --pilots-root ~/Minh/ipf/phase2_outputs \
+    --configs configs/pilot_v10_bench.yaml \
+    --reference-method M0 \
+    --test-methods M_rect M1 M5 M6 M4 \
+    --device cuda:0 --n-boot 1000
+
+# pilot_v10_bench/diagnostics/verdict.md is the paper-ready table.
+```
+
+**Decision tree after step 4**
+
+* All three criteria pass on `mAP_50_95` with non-overlapping CIs → the
+  paper has a defensible scientific contribution. Proceed to ablations.
+* (1) and (2) pass but (3) fails → re-frame the contribution as
+  "matching the best classical ROI baseline at lower complexity" rather
+  than "beating it"; still publishable, smaller scope.
+* Any of (1)/(2) fails → execute D4 (η_emp calibration on server,
+  ~10 h) before any further architectural work; the teacher is the
+  bottleneck, not the model. PROJECT_AUDIT §3 has the spec.
+
+---
+
 ## 8. Standing Instructions
 
 - **Always update this file** when:

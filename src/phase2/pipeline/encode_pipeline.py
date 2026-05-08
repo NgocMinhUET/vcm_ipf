@@ -64,6 +64,8 @@ class EncodingPipeline:
             self.task_evaluator = TaskEvaluator(
                 model_name=cfg.evaluation.detector_model,
                 confidence=cfg.evaluation.detector_confidence,
+                conf_low=cfg.evaluation.detector_conf_low,
+                classes_of_interest=list(cfg.evaluation.detector_classes),
                 device=cfg.evaluation.detector_device,
             )
 
@@ -220,12 +222,13 @@ class EncodingPipeline:
                 seq_cfg.original_width, seq_cfg.original_height,
             )
 
-            logger.info("  Running task evaluation (YOLOv8)...")
+            logger.info("  Running task evaluation (YOLOv8 — real COCO mAP)...")
             ref_frames_dir = seq_cfg.frames_dir if seq_cfg.frames_dir else None
             task_result = self.task_evaluator.compute_task_metrics(
                 decoded_frames_dir=str(dec_frames_dir),
                 reference_frames_dir=ref_frames_dir,
                 n_frames=seq_cfg.n_frames,
+                save_dir=str(run_dir),
             )
             result.task = asdict(task_result)
 

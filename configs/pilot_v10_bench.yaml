@@ -1,0 +1,103 @@
+# =============================================================================
+# Phase 2 Pilot v10_bench — Comprehensive head-to-head against best methods
+# =============================================================================
+# AFTER: pilot_v9b verdict; user mandate "không chỉ beat M0 mà phải beat best methods".
+# This is the definitive comparison: 6 methods at the SAME relative-dQP regime,
+# evaluated under the audited true-mAP metric (D1) with paired statistical
+# tests (D2). All methods receive identical pre-processing:
+#
+#   * relative dQP (per-frame mean centred, [-8, +4] clip)
+#   * rate-neutral projection where applicable
+#   * same Q-base levels
+#   * same evaluation protocol
+#
+# Methods:
+#   M0       Uniform QP                      (anchor; no map)
+#   M_rect   Hand-crafted ROI rectangle      (NEW; trivial baseline)
+#   M1       Binary saliency                 (Phase 1; absolute -> relative)
+#   M5       Anisotropic Gaussian            (Phase 1; absolute -> relative; "best classical")
+#   M6       RD-driven Lagrangian            (Phase 1; absolute -> relative)
+#   M4       LiteQP-CNN-direct               (Phase 3; v8b verdict winner)
+#
+# 6 methods x 3 sequences x 4 QPs = 72 encodes. We can re-use M0 + M4
+# from pilot_v8b (24 encodes) by symlink/copy of recon.yuv if storage
+# allows; otherwise re-encode for independence.
+#
+# Pre-condition (run on server FIRST):
+#
+#   PYTHONPATH=src python scripts/prepare_pilot_v10_root.py \
+#       --sequences MOT17-02-DPM MOT17-04-DPM MOT17-09-DPM \
+#       --base-qps 27 32 37 42 \
+#       --phase1-root ~/Minh/ipf/phase1_outputs \
+#       --phase1-prefix multi_seq_ \
+#       --phase3-root ~/Minh/ipf/phase3_outputs/learned \
+#       --phase3-prefix liteqp_v5d_ \
+#       --unified-root ~/Minh/ipf/pilot_v10_bench_root \
+#       --reference-boxes-dir ~/Minh/ipf/phase2_outputs/pilot_v8b/_reference_boxes \
+#       --frames-cap 50 \
+#       --width 1920 --height 1152
+#
+# Run encode:
+#   bash scripts/run_pilot.sh configs/pilot_v10_bench.yaml
+#
+# Expected wall-clock: ~30 h (48 new encodes + 24 reused).
+# =============================================================================
+
+experiment_id: "pilot_v10_bench"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg: "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  methods: ["M0", "M_rect", "M1", "M5", "M6", "M4"]
+  # Unified root prepared by prepare_pilot_v10_root.py
+  phase1_output_dir: "~/Minh/ipf/pilot_v10_bench_root"
+  phase1_run_prefix: "multi_seq_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
