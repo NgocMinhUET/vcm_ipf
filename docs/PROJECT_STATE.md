@@ -1068,6 +1068,124 @@ python scripts/compare_pilots.py \
 | (1) ✗ but no large regression elsewhere | Path F not strong enough — issue is elsewhere | Path D (expand sequences) |
 | (1) ✗ AND large regression | Path F broke things | Re-tune slope (−0.05 instead of −0.10), or revert to v8b |
 
+### 7.17 Pilot v9 verdict + Action 7 (Path F-tuned) — QP=27-only intervention
+
+**pilot_v9 result** (server, 2026-05-08): the decision tree didn't anticipate
+the actual outcome. We hit a **5th case**: criterion (1) PASSED (MOT17-09
+fixed beautifully, −13.11 % BD-Rate-Task vs +2.06 % in v8b) but criteria
+(2) and (3) BOTH failed catastrophically because the same uniform clip
+that helped MOT17-09 hurt MOT17-04 and MOT17-02 at non-target QPs.
+
+| Pilot | MOT17-04 | MOT17-09 | MOT17-02 | Avg | Tally |
+|---|---:|---:|---:|---:|---:|
+| pilot_v4 | −4.28 % | −13.72 % | −7.82 % | −8.60 % | 7/12 |
+| pilot_v8b | −4.70 % | +2.06 % | **−23.24 %** | **−8.63 %** | **8/12** |
+| pilot_v9 | **+17.14 %** | **−13.11 %** | +18.73 % | +7.58 % | 5/12 |
+
+**Diagnosis (v9 vs v8b per-cell ΔmAP)**:
+
+| Seq | QP=27 | QP=32 | QP=37 | QP=42 |
+|---|---:|---:|---:|---:|
+| MOT17-04 | −0.006 | −0.009 | −0.018 | −0.007 |
+| MOT17-09 | −0.015 | **+0.013** | **+0.017** | +0.005 |
+| MOT17-02 | **−0.040** | **−0.069** | −0.011 | +0.041 |
+
+The clip schedule in v9 was `±1.50 / ±2.00 / ±2.50 / ±3.00` for
+QP=27/32/37/42. v8b had no inference clip — effectively `±8.0` from
+the model's `tanh × 8` activation. So the v9 bound at QP=32 (`±2.0`)
+was **4× tighter** than v8b's effective `±8.0`. MOT17-02 needed wide
+redistribution at QP=32 (lost 0.069 mAP) and MOT17-04 lost mAP at every
+QP under the global tightening.
+
+MOT17-09 *gained* most at QP=32–37 — counter-intuitive given Path F's
+target was QP=27. It seems MOT17-09 actually benefits from a tighter
+global δ envelope (its content prefers near-uniform QP allocation).
+
+**Key insight (publishable as a negative result)**: a single uniform
+Q-aware clip cannot satisfy all sequences because the optimal δ envelope
+is **content-dependent, not Q-dependent**. MOT17-09 (sparse, uniform
+content) prefers tight clipping; MOT17-02/MOT17-04 (dense, heterogeneous
+content) prefer loose clipping. With only n=3 sequences the CNN can't
+learn this distinction internally.
+
+### Action 7 = Path F-tuned: QP=27-only intervention (READY)
+
+**Hypothesis**: only QP=27 needs the tightening (we diagnosed v8b's
+MOT17-09 regression came from QP=27 over-shooting). Restoring v8b's
+free range at QP=32+ should recover MOT17-04 and MOT17-02.
+
+**Schedule** (`base=8.0, slope=-1.30, lo=1.5, hi=8.0`):
+
+| QP | δ̂ bound | Equivalent to v8b? |
+|---:|---:|---|
+| 27 | ±1.50 | TIGHTEN |
+| 32 | ±8.00 | yes (no clip) |
+| 37 | ±8.00 | yes |
+| 42 | ±8.00 | yes |
+
+This is essentially "v8b + clip only at QP=27". Tests cleanly whether
+the QP=27 intervention alone can fix MOT17-09 without disturbing the
+other two sequences.
+
+**Files added (this commit)**:
+
+| Path | Purpose |
+|---|---|
+| `phase2/configs/phase3_liteqp_cnn_direct_qaware_v2.yaml` | NEW — `version: "v5dq2"`, `slope: -1.30, base: 8.0, lo: 1.5, hi: 8.0` |
+| `phase2/configs/pilot_v9b.yaml` | NEW — encode M0 vs `liteqp_v5dq2_*` |
+| `phase2/scripts/sanity_check_phase3_cnn.py` | MOD — test 8 also verifies the QP=27-only schedule |
+
+**Pre-registered §7.17 success criteria for pilot_v9b**:
+
+1. **MOT17-09 BD ≤ −10 %** (currently +2.06 % in v8b, −13.11 % in v9) ← keep the v9 win
+2. **MOT17-02 BD ≤ −15 %** (currently −23.24 % in v8b, +18.73 % in v9) ← restore v8b
+3. **MOT17-04 BD ≤ −2 %** (currently −4.70 % in v8b, +17.14 % in v9) ← restore v8b
+4. **Avg BD ≤ −12 %** (currently −8.63 % in v8b, +7.58 % in v9)
+
+**Decision tree on pilot_v9b outcome**:
+
+| Outcome | Interpretation | Next |
+|---|---|---|
+| All 4 ✓ | Hypothesis confirmed: QP=27-only intervention works | Stop. v9b = final method. Top venue. |
+| (1) ✓ AND (2)+(3) ≈ v8b | We've improved over v8b in MOT17-09 without losing the other sequences | Same as above |
+| (1) ✓ but (2) or (3) regress moderately | Per-seq tradeoff is fundamental | Try Path D (expand sequences) |
+| (1) ✗ | MOT17-09 needs QP=32+ tightening too — uniform clip is wrong | Path D (more data) or Path E (alt method) |
+
+**Run sequence on server** (~14 h encode):
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2 && pip install -e . -q
+
+# 1) Local sanity check (10/10 PASS expected, ~20s)
+PYTHONPATH=src python scripts/sanity_check_phase3_cnn.py
+
+# 2) Build → train (deterministic, identical weights to v8b/v9)
+#    + apply with QP=27-only Q-aware clip
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_cnn_direct_qaware_v2.yaml --start-step 3
+
+# 3) Encode pilot_v9b
+bash scripts/run_pilot.sh configs/pilot_v9b.yaml
+
+# 4) Compare v4 vs v8b vs v9 vs v9b
+python analyze_pilot_v8.py     # local on workspace root, edit RAW dict to add v9b
+```
+
+**Path D (escalation if v9b fails)**:
+
+| Step | Cost |
+|---|---:|
+| Saliency cache for 4 new sequences (MOT17-05/10/11/13) | ~2 h |
+| Rate cache (VVC encode 4 QPs × 4 seq × 50 frames) | ~12 h |
+| Build oracle dataset | ~20 min |
+| Re-train CNN (now 7 seq × 50 × 4 = 1400 spatial samples) | ~10 min |
+| Encode pilot (7 seq × 2 methods × 4 QPs × 50 frames = 56 runs) | ~28 h |
+| **Total Path D single pilot** | **~42 h** |
+
+Plan if Path D triggers: keep the v8b + v9b architecture/inference path,
+just train+encode on the larger dataset. Pre-registered Path D criteria
+will be defined when we trigger it.
+
 ---
 
 ## 8. Standing Instructions

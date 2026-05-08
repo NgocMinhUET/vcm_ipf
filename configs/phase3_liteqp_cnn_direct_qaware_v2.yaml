@@ -1,0 +1,107 @@
+# =============================================================================
+# Phase 3 Stage C v5dq2 — LiteQP-CNN-DIRECT + Q-aware clip (QP=27 ONLY)
+# =============================================================================
+# Action 7 (PROJECT_STATE §7.17). Pilot_v9 demonstrated that the original
+# Path F schedule (slope=-0.10, base=2.0, lo=1.0, hi=3.0) tightened the
+# δ̂ envelope at EVERY QP — fixing MOT17-09 (−13.11 % BD) but destroying
+# MOT17-04 (+17.14 %) and MOT17-02 (+18.73 %).
+#
+# Per-cell diagnosis: v9's bound at QP=32 (±2.0) was 4× tighter than
+# v8b's effective ±8.0 (from tanh×8 model output, no inference clip).
+# MOT17-02 lost 0.069 mAP at QP=32 alone.
+#
+# Hypothesis (Path F-tuned): the QP=27 over-shoot was the only real
+# issue. Tighten ONLY at QP=27, leave QP=32+ as v8b had them.
+#
+# Schedule (slope=-1.30, base=8.0, lo=1.5, hi=8.0):
+#     QP=27 → 1.50    (tighten — keep v9's MOT17-09 win)
+#     QP=32 → 8.00    (effectively unconstrained — restore v8b)
+#     QP=37 → 8.00
+#     QP=42 → 8.00
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "v5dq2"
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:    [27, 32, 37, 42]
+delta_list: [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 8.0       # ← KEY: passed as ``base`` to q_aware_residual_bound
+
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+teacher:
+  lambda_task: 5.0
+  lambda_anchor: 0.6
+  eta: 0.06
+  xi: 0.15
+
+teacher_overrides: {}
+auto_lambda:
+  enabled: false
+
+train:
+  backend:      "cnn"
+  output_mode:  "direct"
+  output_bound: 8.0   # IMPORTANT: keep at 8.0 to match v5d / v8b weights
+                       # (deterministic seed → identical bundle)
+
+  epochs:       100
+  batch_size:   16
+  lr:           0.001
+  weight_decay: 0.0001
+  device:       "cuda:0"
+  seed:         20260506
+
+  huber_delta:  0.5
+  alpha_rnp:    0.10
+  alpha_tv:     0.005
+  alpha_bound:  0.10
+  delta_max:    8.0
+
+  cv:               "both"
+  n_bootstrap:      500
+  bootstrap_alpha:  0.05
+
+apply:
+  device: "cuda:0"
+
+  # ── KEY CHANGE vs v5dq (pilot_v9) ──────────────────────────────────────────
+  # base raised 2.0 → 8.0; slope steepened -0.10 → -1.30; hi raised 3.0 → 8.0.
+  # Net effect: QP=27 still clipped to 1.5, QP=32+ effectively unconstrained.
+  q_aware_bound:
+    enabled: true
+    slope:  -1.30        # steeper negative — only QP=27 hits the lo cap
+    lo:      1.5
+    hi:      8.0
+    # Computed: QP=27→1.50  QP=32→8.00  QP=37→8.00  QP=42→8.00

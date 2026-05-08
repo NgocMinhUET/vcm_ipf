@@ -244,11 +244,12 @@ def main() -> None:
         return yaml.safe_load(open(p, "r", encoding="utf-8"))
 
     cases = [
-        ("phase3_liteqp_v3.yaml",                 "mlp"),
-        ("phase3_liteqp_v4.yaml",                 "mlp"),
-        ("phase3_liteqp_cnn_residual.yaml",       "cnn"),
-        ("phase3_liteqp_cnn_direct.yaml",         "cnn"),
-        ("phase3_liteqp_cnn_direct_qaware.yaml",  "cnn"),
+        ("phase3_liteqp_v3.yaml",                    "mlp"),
+        ("phase3_liteqp_v4.yaml",                    "mlp"),
+        ("phase3_liteqp_cnn_residual.yaml",          "cnn"),
+        ("phase3_liteqp_cnn_direct.yaml",            "cnn"),
+        ("phase3_liteqp_cnn_direct_qaware.yaml",     "cnn"),
+        ("phase3_liteqp_cnn_direct_qaware_v2.yaml",  "cnn"),
     ]
     for cfg_name, expected in cases:
         cfg = _yaml_or_skip(cfg_name)
@@ -282,6 +283,17 @@ def main() -> None:
         ok = abs(got - want) < 1e-9
         assert ok, f"legacy QP={qp}: bound={got} != {want}"
     print(f"    ✓ legacy (positive slope) schedule still correct")
+
+    # Path F-tuned (§7.17): QP=27-only intervention.
+    # base=8.0, slope=-1.30, lo=1.5, hi=8.0
+    #   QP=27 → 1.50, QP=32+ → 8.00 (no clip)
+    expected_v2 = {27: 1.50, 32: 8.00, 37: 8.00, 42: 8.00}
+    for qp, want in expected_v2.items():
+        got = q_aware_residual_bound(qp, base=8.0, slope=-1.30, lo=1.5, hi=8.0)
+        ok = abs(got - want) < 1e-9
+        print(f"    {'✓' if ok else '✗'} (Path F-tuned) QP={qp} → bound = {got:.2f}  "
+              f"(want {want:.2f})")
+        assert ok, f"v2 QP={qp}: bound={got} != {want}"
 
     # ── 9) cnn_direct + Q-aware ⇒ output IS clipped at inference ───────
     print(f"\n[9] cnn_direct + Q-aware: end-to-end clipping behaviour")
