@@ -1,5 +1,22 @@
 # PROJECT STATE — Persistent Memory
 
+> **2026-05-08 — SCIENTIFIC AUDIT IN PROGRESS**:
+> User feedback declared current results "not convincing, unstable, and
+> only against M0". A full audit (`phase2/docs/PROJECT_AUDIT.md`) identified
+> **6 scientific debts**, two of them critical:
+>
+> 1. ΔmAP oracle is hard-coded `η=0.06` (never validated).
+> 2. The metric we call "mAP50" is actually `precision × recall` at one
+>    threshold (not real COCO AP).
+>
+> Phase 1 diagnostic battery (`phase2/src/phase2/diagnostics/`) implements
+> true mAP (D1), paired statistical tests (D2), and φ distribution analysis
+> (D3). All sanity-checked locally (25/25 pass). To be run on the server in
+> parallel with `pilot_v9b`. Server experiment D4 (η empirical calibration)
+> is deferred until D1+D2+D3 verdicts land.
+>
+> **Until D1 lands, treat all "M4 beats/loses to M0" claims as provisional.**
+>
 > **Canonical location (in-repo)**: `phase2/docs/PROJECT_STATE.md` on the
 > `phase2` branch of `vcm_ipf`. The legacy local-only copy at
 > `IPF_Development_Plan/PROJECT_STATE.md` (outside any git repo) is
@@ -166,6 +183,45 @@ accuracy on MOT17 sequences than competing soft-map baselines.
 | (lambda fix) | VTM patch: `setLambda()` alongside `setSliceQp()` per CTU; env-var fallback `VTM_EXTERNAL_QP_DIR` |
 
 ### 5.4 Outstanding issues
+
+**🔴 CRITICAL: Synthetic ΔmAP oracle never validated (Audit §1.4 — 2026-05-08)**
+- **Description**: `build_liteqp_dataset.py:136-141` uses
+  `ΔmAP(c, δ) = -φ_c · η · max(0, δ) + φ_c · η · ξ · max(0, -δ)` with
+  `η=0.06`, `ξ=0.15` hard-coded. Every CNN/MLP since pilot_v3 has been
+  trained against this synthetic oracle. The formula has no empirical
+  validation; observed real ΔmAP is 5-10× smaller, and may not even be
+  linear in δ.
+- **Impact**: All M4 wins/losses since pilot_v3 may be artefacts of
+  optimising the wrong target. Plausibly explains the ±10pp BD-Rate-Task
+  swing across pilots that differ only in inference-time tweaks.
+- **Fix path**: D4 — controlled δ patterns × measured ΔmAP, fit empirical η.
+  Spec at `phase2/docs/D4_eta_calibration_design.md`.
+
+**🔴 CRITICAL: "mAP50" is actually `precision × recall` (Audit §1.5 — 2026-05-08)**
+- **Description**: `task_accuracy.py:227-229` computes
+  `precision × recall` at conf=0.25, IoU=0.5 — not COCO Average Precision.
+  The published `mAP50` numbers in pilot_v0..v9 are NOT comparable to
+  literature mAP and may have wrong sign for the same data.
+- **Impact**: Every BD-Rate-Task value reported so far is on a non-standard
+  metric. Conclusions may invert when re-computed with true COCO mAP.
+- **Fix path**: D1 — `phase2/src/phase2/diagnostics/d1_true_map.py`
+  re-evaluates existing pilot encodes using COCO 101-point AP. To run on
+  the server in parallel with `pilot_v9b`. Sanity-checked locally.
+
+**🟠 HIGH: Statistical significance unknown (Audit §1.6 — 2026-05-08)**
+- **Description**: With n=3 sequences × 50 frames the metric noise floor is
+  estimated at ±0.02–0.04 mAP (D2 will quantify). Most observed
+  M4-vs-M0 differences fall inside that range. We have not run paired
+  tests to separate signal from noise.
+- **Fix path**: D2 — `d2_statistical_significance.py` (paired Wilcoxon +
+  Cohen's d + bootstrap CI per cell). Consumes per-frame counts from D1.
+
+**🟠 HIGH: A+ formula uses PSNR-derived "6" for task (Audit §1.3)**
+- **Description**: `analytic_a_plus.py:162` hard-codes `δ = -6 · log_2(ξ/g)`.
+  The "6" comes from R-D theory for *PSNR* under the high-rate Sullivan
+  -Wiegand model — not for task accuracy.
+- **Fix path**: deferred to post-D4. If D4 yields η_emp(Q_b), refit "6"
+  to a task-derived constant.
 
 **🔴 CRITICAL: QP map calibration mismatch (identified from pilot_v1)**
 - **Description**: Phase 1 IPF maps store ABSOLUTE QP values (~33.6 avg for M4).
