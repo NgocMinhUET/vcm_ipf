@@ -330,8 +330,22 @@ def main() -> None:
         raise SystemExit("--pilots and --configs must have the same length")
 
     rc_total = 0
+    skipped: List[str] = []
     for pilot, cfg in zip(args.pilots, args.configs):
         pilot_dir = args.pilots_root / pilot
+
+        # Pre-flight: skip pilots that were never encoded (no
+        # experiment_summary.json) so one missing pilot does not abort
+        # the whole batch.
+        if not (pilot_dir / "experiment_summary.json").exists():
+            logger.warning(
+                "Pilot %s has no experiment_summary.json under %s — "
+                "skipping (was the encode pipeline ever run for it?)",
+                pilot, pilot_dir,
+            )
+            skipped.append(pilot)
+            continue
+
         diag_dir  = pilot_dir / "diagnostics"
         _ensure_dir(diag_dir)
         d1_out = diag_dir / "d1_true_map.json"
@@ -348,6 +362,7 @@ def main() -> None:
             if rc != 0:
                 logger.error("D1 failed for %s (exit %d) — skipping rest", pilot, rc)
                 rc_total |= rc
+                skipped.append(pilot)
                 continue
 
         if not args.skip_d2 and d1_out.exists():
@@ -369,6 +384,8 @@ def main() -> None:
                             d2_out if d2_out.exists() else None,
                             bd_out, verdict_out)
 
+    if skipped:
+        logger.warning("Skipped %d pilot(s): %s", len(skipped), ", ".join(skipped))
     if rc_total != 0:
         raise SystemExit(rc_total)
     logger.info("All pilots re-evaluated.")
