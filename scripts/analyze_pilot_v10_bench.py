@@ -84,26 +84,28 @@ def _bd_rate_task(rate_a: np.ndarray, mapa: np.ndarray,
     log_ra = np.log10(np.maximum(ra, 1e-9))
     log_rb = np.log10(np.maximum(rb, 1e-9))
 
-    pa = PchipInterpolator(log_ra, qa, extrapolate=False)
-    pb = PchipInterpolator(log_rb, qb, extrapolate=False)
+    # Inverse interpolators map quality → log_rate. PCHIP requires strictly
+    # increasing x, so we must collapse duplicate quality values (common with
+    # only 4 RD points and noisy mAP estimates).
+    qa_inv, log_ra_inv = _monotonise_pchip(qa, log_ra)
+    qb_inv, log_rb_inv = _monotonise_pchip(qb, log_rb)
+    if len(qa_inv) < 2 or len(qb_inv) < 2:
+        return float("nan")
 
-    q_lo = max(qa.min(), qb.min())
-    q_hi = min(qa.max(), qb.max())
+    q_lo = max(qa_inv.min(), qb_inv.min())
+    q_hi = min(qa_inv.max(), qb_inv.max())
     if q_hi - q_lo < 1e-6:
         return float("nan")
 
-    # Find log10(rate) at common qualities, integrate
-    # Invert: solve qa(log_r) = q for log_r
+    try:
+        inv_a = PchipInterpolator(qa_inv, log_ra_inv, extrapolate=False)
+        inv_b = PchipInterpolator(qb_inv, log_rb_inv, extrapolate=False)
+    except ValueError:
+        return float("nan")
+
     grid_q = np.linspace(q_lo, q_hi, 50)
-    log_ra_q = np.empty_like(grid_q); log_rb_q = np.empty_like(grid_q)
-    # Approximate inverse via interpolation on the original data
-    inv_a = PchipInterpolator(qa[np.argsort(qa)], log_ra[np.argsort(qa)],
-                               extrapolate=False)
-    inv_b = PchipInterpolator(qb[np.argsort(qb)], log_rb[np.argsort(qb)],
-                               extrapolate=False)
-    for i, q in enumerate(grid_q):
-        log_ra_q[i] = float(inv_a(q))
-        log_rb_q[i] = float(inv_b(q))
+    log_ra_q = np.asarray([float(inv_a(q)) for q in grid_q])
+    log_rb_q = np.asarray([float(inv_b(q)) for q in grid_q])
     if np.any(np.isnan(log_ra_q)) or np.any(np.isnan(log_rb_q)):
         return float("nan")
 

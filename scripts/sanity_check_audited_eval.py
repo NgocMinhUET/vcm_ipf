@@ -253,6 +253,24 @@ def test_bd_rate_zero_when_equal() -> bool:
     )
 
 
+def test_bd_rate_handles_duplicate_quality() -> bool:
+    """Regression for the server crash on pilot_v4: PchipInterpolator raises
+    ``x must be strictly increasing`` when bootstrap collapses two QPs to the
+    same quality. Must return a finite value (or NaN cleanly), never crash.
+    """
+    # QP=37 and QP=42 share the same quality — a realistic bootstrap outcome.
+    rate_b = [800, 400, 200, 100]
+    qual_b = [0.85, 0.80, 0.55, 0.55]
+    rate_a = [r * 0.95 for r in rate_b]
+    qual_a = qual_b
+    bd = bd_rate_task_pchip(rate_a, qual_a, rate_b, qual_b)
+    return _check(
+        "bd_rate_task_pchip — duplicate quality values do not crash",
+        not np.isnan(bd) and abs(bd) < 50.0,
+        f"BD={bd:+.2f}%",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6) Paired bootstrap on synthetic counts
 # ---------------------------------------------------------------------------
@@ -324,6 +342,7 @@ TESTS = [
     test_d1_cached_detections_fastpath,
     test_bd_rate_basic,
     test_bd_rate_zero_when_equal,
+    test_bd_rate_handles_duplicate_quality,
     test_paired_bootstrap,
 ]
 

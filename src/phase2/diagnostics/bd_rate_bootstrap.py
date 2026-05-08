@@ -54,19 +54,30 @@ def _trapz(y, x):
     return fn(y, x)
 
 
-def _monotonise(rate: np.ndarray, qual: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    order = np.argsort(rate)
-    r = rate[order]; q = qual[order]
-    out_r: List[float] = []; out_q: List[float] = []
+def _dedupe_by_x(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Sort by x ascending and merge duplicate x by averaging y.
+
+    Required because ``PchipInterpolator`` demands strictly-increasing x;
+    bootstrap-resampled per-frame counts often collapse two QP cells onto
+    the same quality value, which would otherwise raise.
+    """
+    order = np.argsort(x)
+    x = x[order]; y = y[order]
+    out_x: List[float] = []; out_y: List[float] = []
     i = 0
-    while i < len(r):
+    while i < len(x):
         j = i
-        while j + 1 < len(r) and abs(r[j + 1] - r[i]) < 1e-9:
+        while j + 1 < len(x) and abs(x[j + 1] - x[i]) < 1e-9:
             j += 1
-        out_r.append(float(r[i]))
-        out_q.append(float(np.mean(q[i:j + 1])))
+        out_x.append(float(x[i]))
+        out_y.append(float(np.mean(y[i:j + 1])))
         i = j + 1
-    return np.asarray(out_r), np.asarray(out_q)
+    return np.asarray(out_x), np.asarray(out_y)
+
+
+def _monotonise(rate: np.ndarray, qual: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Sort by rate ascending and merge duplicate rates by averaging quality."""
+    return _dedupe_by_x(rate, qual)
 
 
 def bd_rate_task_pchip(
@@ -87,14 +98,27 @@ def bd_rate_task_pchip(
         return float("nan")
     log_ra = np.log10(np.maximum(ra, 1e-9))
     log_rb = np.log10(np.maximum(rb, 1e-9))
-    q_lo = max(qa.min(), qb.min())
-    q_hi = min(qa.max(), qb.max())
+
+    # Inverse interpolators map quality → log_rate. PCHIP requires strictly-
+    # increasing input, so collapse duplicate quality values by averaging the
+    # corresponding log_rate. With n=4 RD points this is common in bootstrap
+    # draws where two QPs end up with identical TP/FP ratios.
+    qa_inv, log_ra_inv = _dedupe_by_x(qa, log_ra)
+    qb_inv, log_rb_inv = _dedupe_by_x(qb, log_rb)
+    if len(qa_inv) < 2 or len(qb_inv) < 2:
+        return float("nan")
+
+    q_lo = max(qa_inv.min(), qb_inv.min())
+    q_hi = min(qa_inv.max(), qb_inv.max())
     if q_hi - q_lo < 1e-6:
         return float("nan")
-    inv_a = PchipInterpolator(qa[np.argsort(qa)], log_ra[np.argsort(qa)],
-                               extrapolate=False)
-    inv_b = PchipInterpolator(qb[np.argsort(qb)], log_rb[np.argsort(qb)],
-                               extrapolate=False)
+
+    try:
+        inv_a = PchipInterpolator(qa_inv, log_ra_inv, extrapolate=False)
+        inv_b = PchipInterpolator(qb_inv, log_rb_inv, extrapolate=False)
+    except ValueError:
+        return float("nan")
+
     grid_q = np.linspace(q_lo, q_hi, 50)
     log_a = inv_a(grid_q); log_b = inv_b(grid_q)
     if np.any(np.isnan(log_a)) or np.any(np.isnan(log_b)):
