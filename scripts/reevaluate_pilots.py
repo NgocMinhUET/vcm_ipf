@@ -217,12 +217,14 @@ def render_verdict(
         )
 
     # Stat tests
-    if d2 and "comparisons" in d2:
+    # D2 uses key "results"; tolerate both spellings for backward compat.
+    d2_rows = d2.get("results") or d2.get("comparisons") or []
+    if d2_rows:
         lines.append("")
         lines.append("## Per-cell paired statistical wins (D2)\n")
         lines.append("| Sequence | QP | Method | Δ̄F1 | d | p_Wil | Verdict |")
         lines.append("|---|---:|---|---:|---:|---:|---|")
-        for c in sorted(d2["comparisons"],
+        for c in sorted(d2_rows,
                         key=lambda x: (x["sequence"], int(x["qp_base"]), x["method"])):
             v = ("REAL " + ("WIN" if c["diff_mean"] > 0 else "LOSS")
                  if c.get("is_real_effect") else "noise")
