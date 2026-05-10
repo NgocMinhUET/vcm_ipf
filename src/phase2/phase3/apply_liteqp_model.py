@@ -51,6 +51,17 @@ from phase2.phase3.analytic_a_plus import (
     q_adaptive_bounds,
 )
 from phase2.phase3.train_liteqp_regressor import featurize_row, FEATURE_NAMES
+from phase2.phase3.occupancy import (
+    OGConfig,
+    compute_occupancy_utility,
+    load_boxes_for_frame,
+)
+from phase2.phase3.og_ipf import (
+    MinProtectionConfig,
+    apply_min_object_protection,
+    compute_og_a_plus_delta,
+    compute_og_diagnostics,
+)
 
 logger = logging.getLogger("phase2.phase3.apply_liteqp_model")
 
@@ -184,12 +195,15 @@ def _write_delta_map(delta: np.ndarray, output_path: Path, frame_idx: int,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Apply LiteQP / A+ to make dQP maps")
     parser.add_argument("--mode", choices=["liteqp", "a_plus", "cnn_residual",
-                                            "cnn_direct"],
+                                            "cnn_direct",
+                                            "og_a_plus", "og_liteqp"],
                         required=True,
-                        help='"liteqp"        = A+ + MLP residual; '
-                             '"a_plus"        = analytic baseline; '
+                        help='"liteqp"        = A+ + MLP residual on Φ_oracle; '
+                             '"a_plus"        = analytic baseline on Φ_oracle; '
                              '"cnn_residual"  = A+ + CNN residual (PROJECT_STATE §7.15); '
-                             '"cnn_direct"    = end-to-end CNN, NO A+ prior.')
+                             '"cnn_direct"    = end-to-end CNN, NO A+ prior; '
+                             '"og_a_plus"     = OG-IPF analytic + min-protection (NEW §7.20); '
+                             '"og_liteqp"     = OG-A+ + MLP residual on OG features.')
     parser.add_argument("--model", default="",
                         help="Required if mode=liteqp/cnn_*; "
                              "joblib bundle (MLP) or .pt bundle (CNN)")
@@ -224,6 +238,34 @@ def main() -> None:
     parser.add_argument("--per-qp", action="store_true",
                         help="Write a separate qp_vtm_delta_QP<n>/ per QP. If "
                              "absent, writes only one map (assumes Q_b=32).")
+
+    # --- OG-IPF inputs (PROJECT_STATE §7.20) ---------------------------------
+    parser.add_argument("--boxes-dir", default="",
+                        help="Directory with per-frame YOLO boxes JSON "
+                             "(written by `phase2.phase3.save_boxes`). "
+                             "Required for --mode og_a_plus and og_liteqp.")
+    parser.add_argument("--frame-h", type=int, default=0,
+                        help="Frame height in pixels (used by OG-IPF for "
+                             "CTU-grid clipping). If 0, derived from "
+                             "ctu_rows × ctu_size.")
+    parser.add_argument("--frame-w", type=int, default=0,
+                        help="Frame width in pixels.")
+    parser.add_argument("--ctu-size", type=int, default=128,
+                        help="CTU side length in pixels (default 128).")
+    parser.add_argument("--og-lambda-ctu", type=float, default=0.4)
+    parser.add_argument("--og-lambda-obj", type=float, default=0.6)
+    parser.add_argument("--og-gamma",      type=float, default=0.0,
+                        help="Object size exponent γ ∈ [0, 0.25]. "
+                             "0 = ignore size (default; reviewer-safe).")
+    parser.add_argument("--og-alpha-in",   type=float, default=1.0)
+    parser.add_argument("--og-alpha-ctx",  type=float, default=0.3)
+    parser.add_argument("--og-aggregator", choices=["max", "lp"], default="max")
+    parser.add_argument("--og-p-norm",     type=float, default=4.0)
+    parser.add_argument("--og-min-prot-floor",  type=float, default=1.0)
+    parser.add_argument("--og-min-prot-ceil",   type=float, default=2.2)
+    parser.add_argument("--og-min-prot-slope",  type=float, default=0.08)
+    parser.add_argument("--og-min-prot-eta",    type=float, default=0.7)
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -242,15 +284,58 @@ def main() -> None:
     out_root = Path(args.output_dir).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # ── Load model (mode=liteqp / cnn_*) ───────────────────────────────────
+    # ── OG-IPF: validate boxes directory and build configs ─────────────────
+    og_cfg: Optional[OGConfig] = None
+    og_min_cfg: Optional[MinProtectionConfig] = None
+    boxes_dir: Optional[Path] = None
+    og_diagnostics_log: list[dict] = []  # one dict per frame across all QPs
+    if args.mode in ("og_a_plus", "og_liteqp"):
+        if not args.boxes_dir:
+            raise SystemExit(
+                f"--boxes-dir required when --mode {args.mode}. "
+                "Run `phase2.phase3.save_boxes` first.")
+        boxes_dir = Path(args.boxes_dir).expanduser().resolve()
+        if not boxes_dir.is_dir():
+            raise SystemExit(f"boxes-dir does not exist: {boxes_dir}")
+        og_cfg = OGConfig(
+            lambda_ctu=args.og_lambda_ctu,
+            lambda_obj=args.og_lambda_obj,
+            gamma=args.og_gamma,
+            alpha_in=args.og_alpha_in,
+            alpha_ctx=args.og_alpha_ctx,
+            aggregator=args.og_aggregator,
+            p_norm=args.og_p_norm,
+        )
+        og_min_cfg = MinProtectionConfig(
+            intercept=args.og_min_prot_floor,
+            slope=args.og_min_prot_slope,
+            floor=args.og_min_prot_floor,
+            ceil=args.og_min_prot_ceil,
+            eta=args.og_min_prot_eta,
+        )
+        # Default frame-h/w from ctu_rows × ctu_size if not given.
+        if args.frame_h <= 0:
+            args.frame_h = args.ctu_rows * args.ctu_size
+        if args.frame_w <= 0:
+            args.frame_w = args.ctu_cols * args.ctu_size
+        logger.info("OG-IPF mode=%s: boxes_dir=%s, frame=%dx%d, "
+                     "λ_ctu=%.2f λ_obj=%.2f γ=%.2f α_in=%.2f α_ctx=%.2f "
+                     "min_prot[floor=%.2f, ceil=%.2f, slope=%.3f, η=%.2f]",
+                     args.mode, boxes_dir, args.frame_h, args.frame_w,
+                     og_cfg.lambda_ctu, og_cfg.lambda_obj, og_cfg.gamma,
+                     og_cfg.alpha_in, og_cfg.alpha_ctx,
+                     og_min_cfg.floor, og_min_cfg.ceil,
+                     og_min_cfg.slope, og_min_cfg.eta)
+
+    # ── Load model (mode=liteqp / cnn_* / og_liteqp) ───────────────────────
     # ``pipeline`` (sklearn MLP) and ``cnn_model`` (PyTorch nn.Module) are
     # mutually exclusive — only one is populated based on ``--mode``.
     pipeline = None
     cnn_model = None
     cnn_bundle = None
-    if args.mode == "liteqp":
+    if args.mode in ("liteqp", "og_liteqp"):
         if not args.model:
-            raise SystemExit("--model required when --mode liteqp")
+            raise SystemExit(f"--model required when --mode {args.mode}")
         try:
             import joblib
         except ImportError as exc:
@@ -363,30 +448,67 @@ def main() -> None:
         clip_hi = min(+bg_bound, float(cfg.delta_max_clip))
         ratios_pre_round, ratios_post_round = [], []
         for fi in range(n_frames):
-            sal_path = sal_dir / f"phi_oracle_{fi:06d}.npy"
-            if not sal_path.exists():
-                logger.warning("frame %06d: missing saliency, writing zeros", fi)
-                _write_delta_map(np.zeros((args.ctu_rows, args.ctu_cols)),
-                                 qp_dir / f"qp_{fi:06d}.txt", fi)
-                continue
-            phi_raw = np.load(sal_path).astype(np.float64)
-            if phi_raw.shape != (args.ctu_rows, args.ctu_cols):
-                logger.warning("frame %06d: saliency shape %s ≠ %s — skipping",
-                               fi, phi_raw.shape, (args.ctu_rows, args.ctu_cols))
-                continue
-            phi_norm = _percentile_norm(phi_raw)
             K_grid = K_grids[fi]
             K_norm = K_grid / (np.median(K_grid[K_grid > 0]) + 1e-9
                                if (K_grid > 0).any() else 1.0)
+            G_max_grid: Optional[np.ndarray] = None  # only set in OG modes
 
-            # 1) Analytic prior + exact rate-neutral projection
-            #    NOTE: cnn_direct mode bypasses A+ entirely (delta_a is still
-            #    computed for metadata purposes — useful for diagnostics).
-            delta_a = compute_a_plus_delta(phi_norm, K_grid, qp, cfg)
-            delta_a = project_rate_neutral_exact(delta_a, K_grid)
+            # ── Build phi_norm + (optionally) U_c / G_c_max ─────────────
+            if args.mode in ("og_a_plus", "og_liteqp"):
+                # OG-IPF: load per-frame YOLO boxes and compute U_c, G_c_max.
+                # We *also* load Φ_oracle for the MLP feature stack in
+                # og_liteqp; the MLP residual still operates on the same
+                # 9-feature vector as plain liteqp for parity, with `phi`
+                # replaced by U_c (normalised to [0,1] via percentile).
+                boxes = load_boxes_for_frame(boxes_dir, fi)
+                og = compute_occupancy_utility(
+                    boxes,
+                    frame_h=args.frame_h, frame_w=args.frame_w,
+                    ctu_size=args.ctu_size, cfg=og_cfg,
+                )
+                # The util signal is unbounded; percentile-normalise to [0,1]
+                # for the MLP feature vector and downstream consistency.
+                U_norm = _percentile_norm(og.U)
+                G_max_grid = og.G_max
+                if og.U.shape != (args.ctu_rows, args.ctu_cols):
+                    logger.warning(
+                        "frame %06d: OG-IPF grid shape %s ≠ %s — skipping",
+                        fi, og.U.shape, (args.ctu_rows, args.ctu_cols))
+                    continue
+                # 1) OG-A+ analytic prior on U_c (NOT on Φ).
+                delta_a = compute_og_a_plus_delta(og.U, K_grid, qp, cfg)
+                # 2) Min-object-protection — applied BEFORE projection so
+                #    rate-neutrality is restored after the constraint nudges
+                #    object-CTUs further negative.
+                delta_a = apply_min_object_protection(
+                    delta_a, og.G_max, qp, og_min_cfg)
+                delta_a = project_rate_neutral_exact(delta_a, K_grid)
+                phi_norm = U_norm  # used by og_liteqp's MLP features
+            else:
+                sal_path = sal_dir / f"phi_oracle_{fi:06d}.npy"
+                if not sal_path.exists():
+                    logger.warning("frame %06d: missing saliency, writing zeros", fi)
+                    _write_delta_map(np.zeros((args.ctu_rows, args.ctu_cols)),
+                                     qp_dir / f"qp_{fi:06d}.txt", fi)
+                    continue
+                phi_raw = np.load(sal_path).astype(np.float64)
+                if phi_raw.shape != (args.ctu_rows, args.ctu_cols):
+                    logger.warning("frame %06d: saliency shape %s ≠ %s — skipping",
+                                   fi, phi_raw.shape, (args.ctu_rows, args.ctu_cols))
+                    continue
+                phi_norm = _percentile_norm(phi_raw)
+                # 1) Analytic prior + exact rate-neutral projection
+                #    NOTE: cnn_direct mode bypasses A+ entirely (delta_a is still
+                #    computed for metadata purposes — useful for diagnostics).
+                delta_a = compute_a_plus_delta(phi_norm, K_grid, qp, cfg)
+                delta_a = project_rate_neutral_exact(delta_a, K_grid)
 
-            if args.mode == "liteqp":
-                # 2) Build features + predict residual (per-CTU MLP)
+            if args.mode in ("liteqp", "og_liteqp"):
+                # 2) Build features + predict residual (per-CTU MLP).
+                #    The 9-feature vector is identical for both modes;
+                #    only the ``phi`` channel changes meaning:
+                #    * liteqp     → phi = Φ_oracle (occlusion saliency)
+                #    * og_liteqp  → phi = U_c (normalised OG utility)
                 phi_nbr = _phi_neighbor_mean(phi_norm)
                 phi_grd = _phi_gradient(phi_norm)
                 feats = []
@@ -409,6 +531,12 @@ def main() -> None:
                 r_hat = np.clip(r_hat, -residual_cap, +residual_cap)
                 r_hat = r_hat.reshape(args.ctu_rows, args.ctu_cols)
                 delta_pred = delta_a + r_hat
+                # In OG modes, re-apply the min-protection AFTER residual
+                # so the MLP cannot accidentally up-shift an object CTU
+                # past 0. (The constraint is idempotent.)
+                if args.mode == "og_liteqp" and G_max_grid is not None:
+                    delta_pred = apply_min_object_protection(
+                        delta_pred, G_max_grid, qp, og_min_cfg)
             elif args.mode in ("cnn_residual", "cnn_direct"):
                 # 2) Build the spatial feature stack (7 channels) and run
                 #    one CNN forward pass — much cheaper than the per-CTU
@@ -440,7 +568,11 @@ def main() -> None:
                         delta_pred = np.clip(cnn_out, -residual_cap, +residual_cap)
                     else:
                         delta_pred = cnn_out
-            else:  # a_plus mode
+            elif args.mode == "og_a_plus":
+                # OG-IPF analytic-only: delta_a already includes
+                # min-object-protection from the OG branch above.
+                delta_pred = delta_a
+            else:  # a_plus mode (legacy Φ_oracle baseline)
                 delta_pred = delta_a
 
             # 3) Clip-aware exact projection — preserves rate-neutrality
@@ -459,6 +591,34 @@ def main() -> None:
             delta_int = np.clip(np.rint(delta_pred),
                                 cfg.delta_min_clip, cfg.delta_max_clip)
             ratios_post_round.append(rate_neutral_residual(delta_int, K_grid))
+
+            # OG diagnostics (PROJECT_STATE §7.20 / §9 of user spec).
+            if args.mode in ("og_a_plus", "og_liteqp") and G_max_grid is not None:
+                diag = compute_og_diagnostics(
+                    delta_continuous=delta_pred,
+                    delta_int=delta_int,
+                    G_max=G_max_grid,
+                    K=K_grid,
+                    delta_min_clip=float(cfg.delta_min_clip),
+                    delta_max_clip=float(cfg.delta_max_clip),
+                    rate_ratio_continuous=ratios_pre_round[-1],
+                    rate_ratio_rounded=ratios_post_round[-1],
+                )
+                og_diagnostics_log.append({
+                    "frame_idx": fi, "qp_base": int(qp),
+                    "n_ctus_total":            diag.n_ctus_total,
+                    "pct_object_overlap":      diag.pct_object_overlap,
+                    "pct_context":             diag.pct_context,
+                    "pct_far_background":      diag.pct_far_background,
+                    "mean_delta_object":       diag.mean_delta_object,
+                    "mean_delta_context":      diag.mean_delta_context,
+                    "mean_delta_far_bg":       diag.mean_delta_far_background,
+                    "saturation_lower":        diag.saturation_lower,
+                    "saturation_upper":        diag.saturation_upper,
+                    "rate_ratio_continuous":   diag.rate_ratio_continuous,
+                    "rate_ratio_rounded":      diag.rate_ratio_rounded,
+                    "object_protection_violation": diag.object_protection_violation,
+                })
 
             _write_delta_map(delta_int, qp_dir / f"qp_{fi:06d}.txt", fi)
             prev_delta = delta_int.astype(np.float64)
@@ -491,14 +651,17 @@ def main() -> None:
         "a_plus":       "M4-A+",
         "cnn_residual": "M4-CNN-residual",
         "cnn_direct":   "M4-CNN-direct",
+        "og_a_plus":    "M4-OG-A+",
+        "og_liteqp":    "M4-OG-LiteQP",
     }[args.mode]
     meta = {
         "method":        method_label,
         "mode":          args.mode,
-        "model_path":    args.model if args.mode != "a_plus" else None,
+        "model_path":    args.model if args.mode not in ("a_plus", "og_a_plus") else None,
         "saliency_dir":  str(sal_dir),
         "rate_npz":      str(Path(args.rate_npz).resolve()),
         "frames_dir":    str(frames_dir) if frames_dir else None,
+        "boxes_dir":     str(boxes_dir) if boxes_dir else None,
         "qp_list":       args.qp_list,
         "per_qp":        bool(args.per_qp),
         "n_frames":      n_frames,
@@ -511,16 +674,95 @@ def main() -> None:
             "lo":            float(args.q_aware_min),
             "hi":            float(args.q_aware_max),
         },
+        "og_config": (None if args.mode not in ("og_a_plus", "og_liteqp") else {
+            "lambda_ctu": float(args.og_lambda_ctu),
+            "lambda_obj": float(args.og_lambda_obj),
+            "gamma":      float(args.og_gamma),
+            "alpha_in":   float(args.og_alpha_in),
+            "alpha_ctx":  float(args.og_alpha_ctx),
+            "aggregator": str(args.og_aggregator),
+            "p_norm":     float(args.og_p_norm),
+            "min_protection": {
+                "floor": float(args.og_min_prot_floor),
+                "ceil":  float(args.og_min_prot_ceil),
+                "slope": float(args.og_min_prot_slope),
+                "eta":   float(args.og_min_prot_eta),
+            },
+        }),
         "feature_names": FEATURE_NAMES,
         # Rate-neutrality monitoring — the **continuous, clipped** map is
         # rate-neutral by construction (pre_round_mean ≈ 1.0). The integer
         # map drifts by ~0.5–2 % typically; flag if > 5 %.
         "rate_neutral_log": rate_ratio_log,
+        # Per-frame OG diagnostics (only populated in og_a_plus / og_liteqp).
+        "og_diagnostics_per_frame": og_diagnostics_log,
     }
     with open(out_root / "liteqp_metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     logger.info("Wrote metadata to %s", out_root / "liteqp_metadata.json")
     logger.info("Total maps written: %d", n_total_written)
+
+    # OG diagnostics summary CSV (PROJECT_STATE §7.20 / §9 of user spec).
+    # Aggregates the per-frame OG stats by (qp_base) so the user can
+    # eyeball the rate-ratio drift / object-protection violation at a
+    # glance without parsing JSON.
+    if args.mode in ("og_a_plus", "og_liteqp") and og_diagnostics_log:
+        import csv
+        from collections import defaultdict
+        agg: dict = defaultdict(list)
+        for row in og_diagnostics_log:
+            agg[row["qp_base"]].append(row)
+        csv_path = out_root / "og_diagnostics_summary.csv"
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "qp_base", "n_frames",
+                "mean_pct_object_overlap",
+                "mean_pct_context",
+                "mean_pct_far_bg",
+                "mean_delta_object",
+                "mean_delta_context",
+                "mean_delta_far_bg",
+                "mean_saturation_lower",
+                "mean_saturation_upper",
+                "mean_rate_ratio_continuous",
+                "mean_rate_ratio_rounded",
+                "object_protection_violation_max",
+            ])
+            for qp_v in sorted(agg):
+                rows = agg[qp_v]
+                def _avg(key: str) -> float:
+                    vals = [float(r[key]) for r in rows
+                            if r[key] == r[key]]  # drop NaN
+                    return float(np.mean(vals)) if vals else float("nan")
+                w.writerow([
+                    qp_v, len(rows),
+                    _avg("pct_object_overlap"),
+                    _avg("pct_context"),
+                    _avg("pct_far_background"),
+                    _avg("mean_delta_object"),
+                    _avg("mean_delta_context"),
+                    _avg("mean_delta_far_bg"),
+                    _avg("saturation_lower"),
+                    _avg("saturation_upper"),
+                    _avg("rate_ratio_continuous"),
+                    _avg("rate_ratio_rounded"),
+                    max((float(r["object_protection_violation"])
+                          for r in rows), default=0.0),
+                ])
+        logger.info("Wrote OG diagnostics summary to %s", csv_path)
+        # Hard-fail soft warning: object-protection violation is the headline
+        # invariant of the OG-IPF method. The acceptance criterion is < 5 %.
+        worst = max(
+            (float(r["object_protection_violation"])
+             for r in og_diagnostics_log), default=0.0)
+        if worst > 0.05:
+            logger.warning(
+                "OG-IPF: object_protection_violation = %.2f %% > 5 %% — "
+                "either the min-protection schedule is too weak or the "
+                "rate-neutral projection is fighting the constraint at "
+                "+bg_bound. Investigate before claiming OG-IPF works.",
+                worst * 100.0)
     # Soft warning if any QP shows large post-round drift.
     for entry in rate_ratio_log:
         drift = abs(entry["rate_ratio_post_round_mean"] - 1.0)

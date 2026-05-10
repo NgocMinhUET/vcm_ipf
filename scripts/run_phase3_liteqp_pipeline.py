@@ -190,6 +190,34 @@ def resolve_auto_lambda(cfg: dict, out_root: Path) -> dict:
 # Steps 1 & 2 — reuse Stage B outputs if available
 # ---------------------------------------------------------------------------
 
+def step_save_boxes(cfg, seq, out_root: Path) -> None:
+    """Persist per-frame YOLO boxes for OG-IPF (PROJECT_STATE §7.20).
+
+    Idempotent: if every ``boxes_<frame>.json`` already exists, skip.
+    """
+    target = out_root / "saliency" / seq["name"]
+    target.mkdir(parents=True, exist_ok=True)
+    n = int(seq.get("n_frames", 50))
+    needed = [target / f"boxes_{i:06d}.json" for i in range(n)]
+    if all(p.exists() for p in needed):
+        LOG.info("[boxes:%s] all %d files present, skipping", seq["name"], n)
+        return
+    sal = cfg.get("saliency", {})
+    classes = cfg.get("og", {}).get("detector_classes", [0])
+    cmd = [
+        sys.executable, "-m", "phase2.phase3.save_boxes",
+        "--frames-dir", expand(seq["frames_dir"]),
+        "--output-dir", str(target),
+        "--n-frames",   str(n),
+        "--ctu-size",   str(sal.get("ctu_size", 128)),
+        "--detector",   str(sal.get("detector", "yolov8n.pt")),
+        "--confidence", str(sal.get("confidence", 0.25)),
+        "--device",     str(sal.get("device", "cuda:0")),
+        "--classes",    *[str(c) for c in classes],
+    ]
+    run(cmd, f"save_boxes:{seq['name']}")
+
+
 def step_saliency(cfg, seq, out_root: Path) -> None:
     target = out_root / "saliency" / seq["name"]
     if target.is_dir() and any(target.glob("phi_oracle_*.npy")):
@@ -362,7 +390,8 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
     backend = _backend(cfg)
 
     # Resolve --mode for apply_liteqp_model.py based on backend + output_mode.
-    # Legacy MLP keeps the original "liteqp" / "a_plus" choices.
+    # Legacy MLP keeps the original "liteqp" / "a_plus" choices; OG modes
+    # ("og_a_plus" / "og_liteqp") are only valid with backend == "mlp".
     if backend == "cnn":
         explicit_mode = apply_cfg.get("mode")
         if explicit_mode in ("cnn_residual", "cnn_direct"):
@@ -374,13 +403,15 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
         mode = apply_cfg.get("mode", "liteqp")
 
     qp_list = [str(q) for q in cfg["qp_list"]]
-    nrow = (int(seq.get("height", 1152)) + 127) // 128
-    ncol = (int(seq.get("width", 1920)) + 127) // 128
+    h = int(seq.get("height", 1152))
+    w = int(seq.get("width", 1920))
+    nrow = (h + 127) // 128
+    ncol = (w + 127) // 128
     target_dir = out_root / "learned" / f"liteqp{sfx}_{seq['name']}" / "M4"
     cmd = [
         sys.executable, "-m", "phase2.phase3.apply_liteqp_model",
         "--mode", mode,
-        "--model", str(model_path),
+        "--model", str(model_path) if mode not in ("a_plus", "og_a_plus") else "",
         "--rate-npz", str(out_root / "rate" / seq["name"] / "rate_surrogate.npz"),
         "--saliency-dir", str(out_root / "saliency" / seq["name"]),
         "--frames-dir", expand(seq["frames_dir"]),
@@ -392,6 +423,36 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
         "--residual-bound", str(cfg.get("residual_bound", 2.0)),
         "--per-qp",
     ]
+    # Strip empty "--model" pair (analytic-only modes don't need a model).
+    if "--model" in cmd:
+        i = cmd.index("--model")
+        if cmd[i + 1] == "":
+            del cmd[i:i + 2]
+    # OG-IPF arguments (PROJECT_STATE §7.20).
+    if mode in ("og_a_plus", "og_liteqp"):
+        og_cfg = cfg.get("og", {}) or {}
+        boxes_dir = out_root / "saliency" / seq["name"]
+        cmd += [
+            "--boxes-dir", str(boxes_dir),
+            "--frame-h",   str(h),
+            "--frame-w",   str(w),
+            "--ctu-size",  "128",
+            "--og-lambda-ctu", str(og_cfg.get("lambda_ctu", 0.4)),
+            "--og-lambda-obj", str(og_cfg.get("lambda_obj", 0.6)),
+            "--og-gamma",       str(og_cfg.get("gamma",      0.0)),
+            "--og-alpha-in",    str(og_cfg.get("alpha_in",   1.0)),
+            "--og-alpha-ctx",   str(og_cfg.get("alpha_ctx",  0.3)),
+            "--og-aggregator",  str(og_cfg.get("aggregator", "max")),
+            "--og-p-norm",      str(og_cfg.get("p_norm",     4.0)),
+            "--og-min-prot-floor", str(
+                (og_cfg.get("min_protection") or {}).get("floor", 1.0)),
+            "--og-min-prot-ceil",  str(
+                (og_cfg.get("min_protection") or {}).get("ceil",  2.2)),
+            "--og-min-prot-slope", str(
+                (og_cfg.get("min_protection") or {}).get("slope", 0.08)),
+            "--og-min-prot-eta",   str(
+                (og_cfg.get("min_protection") or {}).get("eta",   0.7)),
+        ]
     # CNN inference device (default to whatever was used for training).
     if backend == "cnn":
         device = apply_cfg.get("device", train_cfg.get("device", "cpu"))
@@ -454,22 +515,38 @@ def main() -> None:
             raise SystemExit(f"No sequences match --only-sequences {args.only_sequences}")
     LOG.info("Processing %d sequences → %s", len(sequences), out_root)
 
+    apply_mode = (cfg.get("apply") or {}).get("mode", "liteqp")
+    needs_boxes = apply_mode in ("og_a_plus", "og_liteqp")
+
     if args.start_step <= 1 <= args.end_step:
         for seq in sequences:
             step_saliency(cfg, seq, out_root)
+            if needs_boxes:
+                step_save_boxes(cfg, seq, out_root)
     if args.start_step <= 2 <= args.end_step:
         for seq in sequences:
             step_rate_surrogate(cfg, seq, out_root)
-    if args.start_step <= 3 <= args.end_step:
+
+    # Steps 3–5 build the residual training set + train an MLP.
+    # In analytic-only modes (a_plus, og_a_plus) the model is unused, so
+    # we skip those steps entirely. The orchestrator log reflects this
+    # decision so the user can re-enable training later by changing
+    # ``apply.mode`` and re-running.
+    is_analytic_only = apply_mode in ("a_plus", "og_a_plus")
+    if is_analytic_only:
+        LOG.info("[apply.mode=%s] analytic-only — skipping steps 3-5 "
+                 "(no MLP residual is trained or needed).", apply_mode)
+
+    if args.start_step <= 3 <= args.end_step and not is_analytic_only:
         for seq in sequences:
             step_build_dataset(cfg, seq, out_root)
 
     dataset_path = out_root / f"oracle_liteqp{sfx}" / f"all_liteqp{sfx}.jsonl"
-    if args.start_step <= 4 <= args.end_step:
+    if args.start_step <= 4 <= args.end_step and not is_analytic_only:
         dataset_path = concatenate_datasets(cfg, out_root)
 
     model_path = out_root / "fit" / f"liteqp_mlp{sfx}.joblib"
-    if args.start_step <= 5 <= args.end_step:
+    if args.start_step <= 5 <= args.end_step and not is_analytic_only:
         model_path = step_train(cfg, dataset_path, out_root)
 
     if args.start_step <= 6 <= args.end_step:

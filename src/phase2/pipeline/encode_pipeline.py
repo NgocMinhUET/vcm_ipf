@@ -324,6 +324,21 @@ class EncodingPipeline:
         )
         return boxes
 
+    # Methods that REQUIRE per-QP delta directories (their formula is
+    # Q-adaptive, so falling back to a generic ``qp_vtm_delta/`` would
+    # silently inject a Q≈32 map into a QP=27 / QP=42 encode and produce
+    # misleading results). PROJECT_STATE §7.20 audit, item A4.
+    _Q_ADAPTIVE_METHODS = frozenset({
+        "M4",            # legacy LiteQP (analytic A+ + MLP)
+        "M4-LiteQP",
+        "M4-A+",
+        "M4-OG",
+        "M4-OG-A+",
+        "M4-OG-LiteQP",
+        "M4-CNN-residual",
+        "M4-CNN-direct",
+    })
+
     def _find_qp_maps(self, seq_name: str, method: str,
                       qp_base: Optional[int] = None) -> Optional[str]:
         """Locate Phase 1 / Phase 3 QP maps for a (sequence, method, Q_base).
@@ -337,6 +352,11 @@ class EncodingPipeline:
             2. ``<run_dir>/qp_vtm_delta/`` — Q_base-agnostic DELTA maps
                (used by pilot_v3 oracle-direct).
             3. ``<run_dir>/qp_vtm/`` — legacy ABSOLUTE maps (pilot v1).
+
+        For Q-adaptive methods (see ``_Q_ADAPTIVE_METHODS``) we **abort**
+        rather than fall back to the generic directory: silently using a
+        Q≈32-calibrated map for a QP=27 or QP=42 encode is the failure
+        mode the §7.20 audit explicitly forbids.
 
         The encoder wrapper auto-detects the format from the file header
         and composes deltas with Q_base on-the-fly when needed.
@@ -353,6 +373,18 @@ class EncodingPipeline:
             per_qp_dir = base / f"qp_vtm_delta_QP{qp_base}"
             if per_qp_dir.is_dir() and any(per_qp_dir.glob("qp_*.txt")):
                 return str(per_qp_dir)
+
+        # Method-specific guard: Q-adaptive M4 variants must NOT use the
+        # generic directory. Surface this as a hard error to prevent
+        # silently misleading encodes (PROJECT_STATE §7.20, audit A4).
+        if method in self._Q_ADAPTIVE_METHODS and qp_base is not None:
+            raise FileNotFoundError(
+                f"Q-adaptive method {method!r} requires per-QP delta "
+                f"directory {base / f'qp_vtm_delta_QP{qp_base}'} but it "
+                "is missing. The generic 'qp_vtm_delta/' fallback is "
+                "forbidden for this method (PROJECT_STATE §7.20). "
+                "Re-run the apply step with --per-qp."
+            )
 
         # 2) Generic delta directory.
         delta_dir = base / "qp_vtm_delta"

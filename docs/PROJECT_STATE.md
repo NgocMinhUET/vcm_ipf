@@ -1356,6 +1356,167 @@ PYTHONPATH=src python scripts/reevaluate_pilots.py \
 
 ---
 
+### 7.20 OG-IPF — Occupancy-Guided Importance Potential Field (NEW, 2026-05-10)
+
+**Driver**: user mandate to deliver "a stronger, more defensible
+version" of the IPF/LiteQP method that *protects object-overlapping
+CTUs by construction*, eliminates manual λ tuning, and enforces
+rate-neutrality through clipping + rounding. The mandate explicitly
+requested an audit before any code change; the audit is the first
+sub-section below.
+
+#### 7.20.1 Audit (deliverable §2 of the user spec)
+
+| Question | Finding |
+|---|---|
+| **A1** Current importance formula | Phase 1 IPF `m_j · 1/(d^β + ε)`; Phase 3 replaces it with `Φ_oracle = Σ Δconfidence` (occlusion saliency, Zeiler-Fergus). The boxes themselves are **not persisted** — we add `phase3.save_boxes` to fix this. |
+| **A2** Where Φ → δQP | Single call site: `analytic_a_plus.compute_a_plus_delta` from `build_liteqp_dataset.py` and `apply_liteqp_model.py`. Replacing Φ with `U_c` at this call site is the entire scientific change. |
+| **A3** Rate-neutral projection | `analytic_a_plus.project_rate_neutral_clipped_exact` already does the bisection; we extend it to accept **per-CTU bounds** so OG-IPF can pin protected CTUs at `≤ -δ_min·G^η`. |
+| **A4** Final rounded map rate-neutral? | **No** — integer rounding always introduces 0.5–2 % drift; `apply_liteqp_model.py` logs both `pre_round` and `post_round` ratios. We will continue to log this discipline. |
+| **A5** Per-QP directory loading | `_find_qp_maps` had a **silent fallback** to `qp_vtm_delta/`. We harden it: Q-adaptive M4 variants must use `qp_vtm_delta_QP{Q}/` or the encoder *raises* (no silent miscalibration). |
+| **A6** Object-overlapping CTUs sufficiently protected? | **No.** The (m·d^-β) formula gives small distant pedestrians small mass, so their host CTUs receive moderate (sometimes positive!) δQP. This is the central scientific failure the OG-IPF fixes. |
+| **A7** Failure modes on small objects | Three: (1) mass dilution via `√(wh)`; (2) distance kernel normalisation by `w_j` shrinks the effective protected radius; (3) sum/L_p aggregation can let dense regions drown out isolated small targets. |
+| **A8** λ_task automatic? | `auto_lambda.py` already implements §7 of the spec verbatim. OG configs **must** set `auto_lambda.enabled: true` (mandatory in pilot_v6_og.yaml). |
+
+#### 7.20.2 OG-IPF mathematical core (single source of truth)
+
+For frame *t*, object *j* with bbox `B_j = (x_j, y_j, w_j, h_j)`,
+CTU *c* with rectangle `R_c`:
+
+```
+A^ctu_{j,c} = |R_c ∩ B_j| / |R_c|
+A^obj_{j,c} = |R_c ∩ B_j| / |B_j|
+G_{j,c}     = clip(λ_ctu·A^ctu_{j,c} + λ_obj·A^obj_{j,c}, 0, 1)        (default 0.4 / 0.6)
+P_{j,t}     = π_j · τ_{j,t} · c_{j,t} · (w_j h_j)^γ                     (default γ = 0)
+D_{j,c}     = 1 / (d_{j,c}^β + ε_k)                                     (legacy distance kernel)
+C_{j,c}     = (1 - G_{j,c}) · D_{j,c}                                   (smooth context, outside box only)
+U_{j,c}     = P_{j,t} · (α_in · G_{j,c} + α_ctx · C_{j,c})              (default 1.0 / 0.3)
+U_c         = max_j U_{j,c}            (default; alt. (Σ U^p)^{1/p}, p=4)
+G_c         = max_j G_{j,c}            (used for the (★) constraint)
+```
+
+RD-log A+ on `U_c`:
+
+```
+ξ_c     = (U_c + ε) / (K̃_c + κ)^β
+g       = Σ K_c · ξ_c / Σ K_c
+δ^A+_c  = -6 · log_2(ξ_c / g) · scale(Q_b)
+```
+
+**Minimum object-protection constraint (★)** — the headline change:
+
+```
+δ_c   ≤   -δ_min(Q_b) · G_c^η                                          (★)
+
+δ_min(Q_b) = clip(1.0 + 0.08·(Q_b - 27),  1.0,  2.2)         (smooth)
+η          = 0.7
+```
+
+A CTU fully inside an object (`G_c = 1`) is forced to receive at
+least `δQP = -1.0` at QP=27 and `-2.2` at QP=42 — exactly the
+detector-saturation regime where mAP needs the most quality.
+
+The constraint is enforced **before** rate-neutral projection AND
+re-imposed as a **per-CTU upper bound** in the projection's bisection.
+This is the only design that (i) satisfies (★) post-clipping, (ii)
+preserves continuous rate-neutrality (`Σ K · 2^{-δ/6} = Σ K` to
+machine precision), and (iii) keeps integer rounding within the
+constraint by capping the rounded value at `floor(-δ_min·G^η)`.
+
+#### 7.20.3 Files added / modified
+
+| File | Change |
+|---|---|
+| `phase2/src/phase2/phase3/occupancy.py` | **NEW.** `OGConfig`, `ObjectBox`, `compute_occupancy_utility` returning `(U, G_max)` plus per-frame box loader. Pure NumPy; ≈ 2 ms/frame at MOT17 density. |
+| `phase2/src/phase2/phase3/og_ipf.py`     | **NEW.** `min_protection_floor`, `apply_min_object_protection`, `compute_og_a_plus_delta`, `end_to_end_og_a_plus`, `compute_og_diagnostics`. Implements (★) as a per-CTU upper bound during projection (the only correct way — see Test 6 in the sanity script). |
+| `phase2/src/phase2/phase3/save_boxes.py` | **NEW.** Writes `boxes_<frame>.json` for each frame using YOLO; idempotent and deferred to first OG-mode run only. |
+| `phase2/src/phase2/phase3/analytic_a_plus.py` | **MODIFIED.** `project_rate_neutral_clipped_exact` now accepts **per-CTU** lower / upper bounds (broadcast-compatible NumPy arrays). Mathematically identical to the scalar case when given scalars. |
+| `phase2/src/phase2/phase3/apply_liteqp_model.py` | **MODIFIED.** New modes `og_a_plus` and `og_liteqp`; new flags `--boxes-dir, --frame-h/w, --ctu-size, --og-*, --og-min-prot-*`; per-frame OG diagnostics aggregated into `og_diagnostics_summary.csv`; metadata records the OG hyper-parameters. |
+| `phase2/src/phase2/pipeline/encode_pipeline.py` | **MODIFIED.** `_find_qp_maps` no longer silently falls back to `qp_vtm_delta/` for Q-adaptive M4 variants — raises `FileNotFoundError` to make miscalibration impossible. |
+| `phase2/scripts/run_phase3_liteqp_pipeline.py` | **MODIFIED.** `step_save_boxes` (only when OG mode is active); analytic-only modes skip steps 3–5 (no MLP training); OG hyper-parameters wired into the apply CLI. |
+| `phase2/configs/phase3_liteqp_og.yaml` | **NEW.** OG pipeline config; `auto_lambda.enabled: true`; default `apply.mode: og_a_plus`. |
+| `phase2/configs/pilot_v6_og.yaml`        | **NEW.** M0 vs M4-OG, prefix `liteqp_og_`. |
+| `phase2/scripts/sanity_check_og_ipf.py`  | **NEW.** 8 offline tests (occupancy math, schedule monotonicity, idempotence, rate-neutrality, post-projection violation, dict loaders, end-to-end on a 5-frame fake sequence). **8 / 8 PASS.** |
+| `phase2/scripts/og_smoke_5frame.py`      | **NEW.** Real 5-frame YOLO + apply test (no VTM); checks dir layout, diagnostics CSV, violation < 5 %, rate drift < 5 %. |
+
+#### 7.20.4 Pre-registered acceptance criteria for `pilot_v6_og`
+
+(strictly stricter than §7.18 because the OG-IPF should be a *real* improvement, not just a noise-floor tie)
+
+1. **Method-level invariants** (must hold by construction; if not, the implementation is broken, not the science):
+   * `mean object_protection_violation < 5 %` on every (seq, QP) cell.
+   * `rate_ratio_post_round ∈ [0.95, 1.05]` on every (seq, QP) cell.
+2. **Aggregate task gain**: M4-OG mean BD-Rate-Task ≤ −5 % across the 3 sequences under audited evaluation (real MOT17 GT, paired bootstrap CI strictly negative).
+3. **Per-cell wins**: ≥ 4 / 12 cells with REAL WIN (paired Wilcoxon p < 0.05 *and* |Cohen's d| > 0.2 on per-frame F1).
+4. **Catastrophic-loss cap**: at most 1 / 12 cells may have a REAL LOSS for M4-OG vs M0.
+5. **Sanity**: `sanity_check_og_ipf.py` returns 8 / 8 PASS on the server (smoke).
+
+If (1) or (2) fail → bug, not a research result; debug `og_diagnostics_summary.csv` first.
+If (3)/(4) fail under YOLOv8m (Path A) → write up as honest negative-tendency per `PROJECT_AUDIT §5`.
+
+#### 7.20.5 Server commands
+
+```bash
+cd ~/Minh/ipf/phase2 && git pull origin phase2
+
+# 1. Sanity (no GPU, < 30 s)
+PYTHONPATH=src python scripts/sanity_check_og_ipf.py
+# Expect: PASSED: 8 / 8
+
+# 2. Smoke generation (5 frames, ~2 min on CPU; uses YOLOv8n on real frames)
+PYTHONPATH=src python scripts/og_smoke_5frame.py \
+    --frames-dir ~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1 \
+    --rate-npz   ~/Minh/ipf/phase3_outputs/rate/MOT17-04-DPM/rate_surrogate.npz \
+    --output-dir /tmp/og_smoke_v1 \
+    --device cuda:0
+# Expect: "OG smoke PASSED" + violation/drift < 5 %
+
+# 3. Full OG generation (Stage C) for 3 sequences (~5 min total since
+#    saliency + rate npz are cached). Mode = og_a_plus by default; flip
+#    the YAML to og_liteqp to add the MLP residual.
+PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+    --config configs/phase3_liteqp_og.yaml
+
+# Verify per-QP delta dirs (no silent fallback).
+ls ~/Minh/ipf/phase3_outputs/learned/liteqp_og_MOT17-04-DPM/M4/
+
+# 4. Encode pilot_v6_og (24 runs ≈ 14 h on a single GPU).
+bash scripts/run_pilot.sh configs/pilot_v6_og.yaml
+
+# 5. Audited evaluation (real MOT17 GT, paired bootstrap CI, YOLOv8m
+#    if Path A is in effect — see §7.19).
+PYTHONPATH=src python scripts/reevaluate_pilots.py \
+    --pilots pilot_v6_og \
+    --pilots-root ~/Minh/ipf/phase2_outputs \
+    --configs configs/pilot_v6_og.yaml \
+    --reference-method M0 --test-methods M4 \
+    --device cuda:0 --n-boot 1000
+```
+
+#### 7.20.6 Paper narrative paragraph (deliverable §13.10)
+
+> The classical IPF models object influence as a smooth mass-distance
+> potential field. In machine-vision-oriented coding, however, CTUs
+> overlapping semantic objects must receive minimum quality protection
+> *even when the object's mass is small* — a property the multiplicative
+> mass term cannot guarantee for distant or partially-occluded targets.
+> We therefore introduce the Occupancy-Guided IPF (OG-IPF), which
+> decouples occupancy protection from contextual influence. A two-term
+> occupancy gate `G_{j,c} = λ_ctu A^{ctu}_{j,c} + λ_obj A^{obj}_{j,c}`
+> guarantees that small objects falling entirely inside one CTU still
+> receive a high gate value via `A^{obj}`. The contextual term
+> `(1-G)·D` retains the smooth potential-field behaviour around objects.
+> A minimum-protection constraint `δ_c ≤ -δ_min(Q_b)·G_c^η` is enforced
+> as a per-CTU upper bound during a clipped exact rate-neutral
+> projection, so it survives both clipping and integer rounding by
+> construction. A lightweight residual regressor optionally corrects
+> the analytic RD-log allocation under the same rate-neutral / Q-adaptive
+> constraints. Auto-λ derived from the M0 anchor's task-rate elasticity
+> eliminates manual per-sequence tuning, addressing reviewer concerns
+> raised in earlier pilots.
+
+---
+
 ### 7.19 Audited-GT verdict (real MOT17) + Path A — stronger detector
 
 **Date**: 2026-05-08 (evening). The §7.18 protocol was executed on the

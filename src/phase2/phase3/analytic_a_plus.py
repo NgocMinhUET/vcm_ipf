@@ -231,8 +231,8 @@ def project_rate_neutral_linear(
 def project_rate_neutral_clipped_exact(
     delta: np.ndarray,
     K: np.ndarray,
-    delta_min: float,
-    delta_max: float,
+    delta_min,
+    delta_max,
     n_iter: int = 60,
     tol: float = 1e-9,
 ) -> np.ndarray:
@@ -252,16 +252,27 @@ def project_rate_neutral_clipped_exact(
     monotonically *decreasing* in ``s`` (more shift ⇒ higher post-shift δ ⇒
     fewer bits), so bisection always converges.
 
+    ``delta_min`` and ``delta_max`` may be **scalars** *or* **arrays** of
+    the same shape as ``delta``. Per-CTU bounds are required by the
+    OG-IPF min-object-protection constraint (PROJECT_STATE §7.20) — the
+    upper bound at a strongly-occupied CTU is ``-δ_min(Q_b) · G_c^η``
+    instead of the generic ``+bg_bound``, so any post-projection global
+    shift cannot push protected CTUs back above zero.
+
     Returns the **clipped** delta map.
     """
     delta = np.asarray(delta, dtype=np.float64)
     K = np.asarray(K, dtype=np.float64)
+    delta_min_arr = np.broadcast_to(np.asarray(delta_min, dtype=np.float64),
+                                     delta.shape)
+    delta_max_arr = np.broadcast_to(np.asarray(delta_max, dtype=np.float64),
+                                     delta.shape)
     target = float(np.sum(K))
     if target <= 0:
-        return np.clip(delta, delta_min, delta_max)
+        return np.minimum(np.maximum(delta, delta_min_arr), delta_max_arr)
 
     def rate_sum(s: float) -> float:
-        d = np.clip(delta + s, delta_min, delta_max)
+        d = np.minimum(np.maximum(delta + s, delta_min_arr), delta_max_arr)
         return float(np.sum(K * np.power(2.0, -d / 6.0)))
 
     # Wide bracket — well outside any reasonable QP shift in [-30, +30].
@@ -270,9 +281,9 @@ def project_rate_neutral_clipped_exact(
     f_hi = rate_sum(hi)   # small
     # If the target is unreachable even at the extremes, return best-effort.
     if not (f_hi <= target <= f_lo):
-        # Pick the bracket end closest to the target.
-        return np.clip(delta + (lo if abs(f_lo - target) < abs(f_hi - target)
-                                else hi), delta_min, delta_max)
+        s_best = lo if abs(f_lo - target) < abs(f_hi - target) else hi
+        return np.minimum(np.maximum(delta + s_best, delta_min_arr),
+                           delta_max_arr)
 
     for _ in range(n_iter):
         mid = 0.5 * (lo + hi)
@@ -284,7 +295,7 @@ def project_rate_neutral_clipped_exact(
             break
 
     s = 0.5 * (lo + hi)
-    return np.clip(delta + s, delta_min, delta_max)
+    return np.minimum(np.maximum(delta + s, delta_min_arr), delta_max_arr)
 
 
 def rate_neutral_residual(delta: np.ndarray, K: np.ndarray) -> float:
