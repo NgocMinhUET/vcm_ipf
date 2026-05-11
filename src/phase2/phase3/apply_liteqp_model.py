@@ -61,6 +61,7 @@ from phase2.phase3.og_ipf import (
     apply_min_object_protection,
     compute_og_a_plus_delta,
     compute_og_diagnostics,
+    min_protection_floor,
 )
 
 logger = logging.getLogger("phase2.phase3.apply_liteqp_model")
@@ -578,18 +579,49 @@ def main() -> None:
             # 3) Clip-aware exact projection — preserves rate-neutrality
             #    *after* clipping (plain exact projection breaks once a CTU
             #    saturates at a bound). Returns an already-clipped map.
-            delta_pred = project_rate_neutral_clipped_exact(
-                delta_pred, K_grid,
-                delta_min=clip_lo, delta_max=clip_hi,
-            )
+            #
+            #    In OG modes the upper bound is **per-CTU**:
+            #        upper_c = min(+bg_bound,  -δ_min(Q_b)·G_c^η)   if G_c > 0
+            #                  +bg_bound                              else
+            #    so the projection's global shift cannot push protected
+            #    CTUs back above zero (PROJECT_STATE §7.20.1 / 7.20.2 —
+            #    the failure that the violation_max diagnostic caught
+            #    in pilot_v6_og: 0.33–1.00 instead of < 0.05).
+            if args.mode in ("og_a_plus", "og_liteqp") and G_max_grid is not None:
+                delta_min_q = min_protection_floor(qp, og_min_cfg)
+                g_arr = np.clip(G_max_grid, 0.0, 1.0)
+                upper_per_ctu = np.minimum(
+                    clip_hi,
+                    -delta_min_q * np.power(g_arr, og_min_cfg.eta),
+                )
+                upper_per_ctu = np.where(g_arr > 0.0, upper_per_ctu, clip_hi)
+                delta_pred = project_rate_neutral_clipped_exact(
+                    delta_pred, K_grid,
+                    delta_min=clip_lo, delta_max=upper_per_ctu,
+                )
+            else:
+                delta_pred = project_rate_neutral_clipped_exact(
+                    delta_pred, K_grid,
+                    delta_min=clip_lo, delta_max=clip_hi,
+                )
 
             # Continuous-map ratio (should be 1.0 to machine precision).
             ratios_pre_round.append(rate_neutral_residual(delta_pred, K_grid))
 
             # 4) Final integer rounding (VVC requires integer δQP).
-            #    NOTE: rounding can drift the rate-neutral ratio; we monitor it.
-            delta_int = np.clip(np.rint(delta_pred),
-                                cfg.delta_min_clip, cfg.delta_max_clip)
+            #    In OG modes we cap the rounded value at floor(upper_per_ctu)
+            #    so integer rounding cannot push protected CTUs back across
+            #    zero either. (`floor(-0.616) = -1` ensures δ ≤ -1, which is
+            #    safely ≤ -0.616 ⇒ (★) constraint holds.)
+            if args.mode in ("og_a_plus", "og_liteqp") and G_max_grid is not None:
+                upper_int = np.floor(upper_per_ctu)
+                delta_int = np.minimum(
+                    np.maximum(np.rint(delta_pred), float(cfg.delta_min_clip)),
+                    upper_int,
+                )
+            else:
+                delta_int = np.clip(np.rint(delta_pred),
+                                    cfg.delta_min_clip, cfg.delta_max_clip)
             ratios_post_round.append(rate_neutral_residual(delta_int, K_grid))
 
             # OG diagnostics (PROJECT_STATE §7.20 / §9 of user spec).

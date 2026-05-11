@@ -233,6 +233,13 @@ def t08_apply_smoke() -> None:
     required by the path validator), and a rate surrogate npz. Then we
     invoke the apply script and assert the directory layout + the
     diagnostics CSV.
+
+    The boxes are pinned to a **deterministic** location and large
+    enough that several CTUs end up with G_c > 0.5 every frame. This
+    way, ``object_protection_violation`` is a meaningful number (the
+    bug discovered in pilot_v6_og — violation_max ≈ 1.0 for a
+    sequence with too few overlap CTUs — was hidden by the previous
+    randomised-tiny-bbox fixture).
     """
     with tempfile.TemporaryDirectory() as td:
         td_p = Path(td)
@@ -253,10 +260,11 @@ def t08_apply_smoke() -> None:
             np.save(sal / f"phi_oracle_norm_{fi:06d}.npy",
                      np.random.default_rng(fi).uniform(size=(ctu_rows, ctu_cols))
                      .astype(np.float32))
-            # One random "person" inside the frame for each fi.
-            x1 = float(np.random.default_rng(100 + fi).uniform(0, 1700))
-            y1 = float(np.random.default_rng(200 + fi).uniform(0, 1000))
-            box = {"xyxy": [x1, y1, x1 + 80.0, y1 + 200.0],
+            # **Deterministic**, large box that fully overlaps several
+            # CTUs. We place it at row 3-4, col 5-7 with size 256x384
+            # so ~6 CTUs see G > 0.5 every frame (a regression-stable
+            # number that catches the violation_max bug).
+            box = {"xyxy": [640.0, 384.0, 1024.0, 640.0],
                    "score": 0.9, "class": 0, "class_priority": 1.0}
             payload = {"frame_idx": fi, "frame_size": [1920, 1152],
                        "ctu_size": 128, "boxes": [box]}
@@ -297,6 +305,39 @@ def t08_apply_smoke() -> None:
             ok,
             f"dirs={all_present} n_maps={n_maps}/{4 * n_frames} "
             f"meta={meta_ok} csv={csv_ok}",
+        )
+
+        # ── Test 09 (regression): real CSV must show violation < 5 % and
+        #    rate-ratio drift < 5 % for every QP. This is the invariant
+        #    that pilot_v6_og violated due to scalar-bounded projection.
+        if not csv_ok:
+            return
+        import csv as _csv
+        worst_violation = 0.0
+        worst_drift     = 0.0
+        rows_seen       = 0
+        with open(out_dir / "og_diagnostics_summary.csv",
+                   "r", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                rows_seen += 1
+                worst_violation = max(
+                    worst_violation,
+                    float(row["object_protection_violation_max"]),
+                )
+                worst_drift = max(
+                    worst_drift,
+                    abs(float(row["mean_rate_ratio_rounded"]) - 1.0),
+                )
+        _result(
+            "09 OG apply CSV: object_protection_violation_max < 5 % "
+            "AND |rate_ratio_rounded - 1| < 5 % every QP "
+            "(regression for pilot_v6_og bug)",
+            rows_seen >= 4
+                and worst_violation < 0.05
+                and worst_drift < 0.05,
+            f"rows={rows_seen} worst_violation={worst_violation:.4f} "
+            f"worst_drift={worst_drift:.4f}",
         )
 
 
