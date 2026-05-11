@@ -633,13 +633,15 @@ def main() -> None:
                     upper_int,
                 )
                 # ── Post-rounding rate-neutrality correction ──────────────────
-                # Context CTUs with G in [g_min_protect, 0.5) can be floor-clipped
-                # from rint=-1 to upper_int=-2 by the clamp above, creating a
-                # systematic +5–7 % rate bias in sparse scenes (PROJECT_STATE
-                # §7.20.3). Fix: push the lowest-K pure-background (G=0) CTUs
-                # by +1 until the K-weighted rate ratio returns to [0.96, 1.04].
-                # Object protection (★) is never compromised — only G=0 CTUs
-                # (the ones furthest from any detected object) are touched.
+                # Context CTUs near the object boundary get floor-clipped
+                # (rint=-1 → upper_int=-2), creating +5–7 % rate bias in
+                # sparse scenes.  Fix: push freed CTUs (G < g_thresh, i.e. not
+                # subject to the ★ hard-cap) up or down by ±1 per pass,
+                # sorted by DESCENDING K so each push has maximum impact.
+                # Multiple passes allow a freed-context CTU at δ=-1 to step
+                # all the way to +bg_bound if needed.
+                # Object protection (★) is never touched — only freed CTUs
+                # (G < g_thresh) are modified.
                 _RTOL_ = 0.04
                 _K_f_ = K_grid.ravel()
                 _d_f_ = delta_int.ravel().astype(np.float64)
@@ -647,28 +649,46 @@ def main() -> None:
                     np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
                     / (np.sum(_K_f_) + 1e-9))
                 if abs(_r_now_ - 1.0) > _RTOL_:
-                    _bg_idx_ = np.where(G_max_grid.ravel() == 0.0)[0]
-                    _ord_ = _bg_idx_[np.argsort(_K_f_[_bg_idx_])]
+                    # Include freed-context (G < g_thresh, not hard-capped)
+                    _free_idx_ = np.where(G_max_grid.ravel() < g_thresh)[0]
+                    # Descending K: highest-K freed CTU pushed first → most
+                    # rate impact per step, fewest CTUs disturbed overall.
+                    _ord_ = _free_idx_[np.argsort(-_K_f_[_free_idx_])]
                     _up_ = float(np.floor(clip_hi))
                     _lo_ = float(cfg.delta_min_clip)
+                    _n_passes_ = int(_up_ - _lo_) + 2  # enough for full range
                     if _r_now_ > 1.0:
-                        for _ci_ in _ord_:
-                            _r_ = float(
-                                np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
-                                / (np.sum(_K_f_) + 1e-9))
-                            if _r_ <= 1.0 + _RTOL_:
+                        for _pass_ in range(_n_passes_):
+                            _any_ = False
+                            _done_ = False
+                            for _ci_ in _ord_:
+                                _r_ = float(
+                                    np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
+                                    / (np.sum(_K_f_) + 1e-9))
+                                if _r_ <= 1.0 + _RTOL_:
+                                    _done_ = True
+                                    break
+                                if _d_f_[_ci_] < _up_:
+                                    _d_f_[_ci_] += 1.0
+                                    _any_ = True
+                            if _done_ or not _any_:
                                 break
-                            if _d_f_[_ci_] < _up_:
-                                _d_f_[_ci_] += 1.0
                     else:
-                        for _ci_ in _ord_:
-                            _r_ = float(
-                                np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
-                                / (np.sum(_K_f_) + 1e-9))
-                            if _r_ >= 1.0 - _RTOL_:
+                        for _pass_ in range(_n_passes_):
+                            _any_ = False
+                            _done_ = False
+                            for _ci_ in _ord_:
+                                _r_ = float(
+                                    np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
+                                    / (np.sum(_K_f_) + 1e-9))
+                                if _r_ >= 1.0 - _RTOL_:
+                                    _done_ = True
+                                    break
+                                if _d_f_[_ci_] > _lo_:
+                                    _d_f_[_ci_] -= 1.0
+                                    _any_ = True
+                            if _done_ or not _any_:
                                 break
-                            if _d_f_[_ci_] > _lo_:
-                                _d_f_[_ci_] -= 1.0
                     delta_int = _d_f_.reshape(delta_int.shape)
                 # ── end post-rounding correction ──────────────────────────────
             else:
