@@ -632,6 +632,45 @@ def main() -> None:
                     np.maximum(np.rint(delta_pred), float(cfg.delta_min_clip)),
                     upper_int,
                 )
+                # ── Post-rounding rate-neutrality correction ──────────────────
+                # Context CTUs with G in [g_min_protect, 0.5) can be floor-clipped
+                # from rint=-1 to upper_int=-2 by the clamp above, creating a
+                # systematic +5–7 % rate bias in sparse scenes (PROJECT_STATE
+                # §7.20.3). Fix: push the lowest-K pure-background (G=0) CTUs
+                # by +1 until the K-weighted rate ratio returns to [0.96, 1.04].
+                # Object protection (★) is never compromised — only G=0 CTUs
+                # (the ones furthest from any detected object) are touched.
+                _RTOL_ = 0.04
+                _K_f_ = K_grid.ravel()
+                _d_f_ = delta_int.ravel().astype(np.float64)
+                _r_now_ = float(
+                    np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
+                    / (np.sum(_K_f_) + 1e-9))
+                if abs(_r_now_ - 1.0) > _RTOL_:
+                    _bg_idx_ = np.where(G_max_grid.ravel() == 0.0)[0]
+                    _ord_ = _bg_idx_[np.argsort(_K_f_[_bg_idx_])]
+                    _up_ = float(np.floor(clip_hi))
+                    _lo_ = float(cfg.delta_min_clip)
+                    if _r_now_ > 1.0:
+                        for _ci_ in _ord_:
+                            _r_ = float(
+                                np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
+                                / (np.sum(_K_f_) + 1e-9))
+                            if _r_ <= 1.0 + _RTOL_:
+                                break
+                            if _d_f_[_ci_] < _up_:
+                                _d_f_[_ci_] += 1.0
+                    else:
+                        for _ci_ in _ord_:
+                            _r_ = float(
+                                np.sum(_K_f_ * np.power(2.0, -_d_f_ / 6.0))
+                                / (np.sum(_K_f_) + 1e-9))
+                            if _r_ >= 1.0 - _RTOL_:
+                                break
+                            if _d_f_[_ci_] > _lo_:
+                                _d_f_[_ci_] -= 1.0
+                    delta_int = _d_f_.reshape(delta_int.shape)
+                # ── end post-rounding correction ──────────────────────────────
             else:
                 delta_int = np.clip(np.rint(delta_pred),
                                     cfg.delta_min_clip, cfg.delta_max_clip)
