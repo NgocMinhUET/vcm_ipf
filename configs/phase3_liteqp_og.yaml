@@ -119,3 +119,7 @@ og:
     ceil:  2.2   # δ_min(Q_b=42) at most
     slope: 0.08  # δ_min(Q_b) = clip(floor + slope·(Q_b - 27), floor, ceil)
     eta:   0.7   # exponent on G_c^η in the constraint δ_c ≤ -δ_min·G^η
+    g_min_protect: 0.10  # CTUs with G ≤ this skip the hard cap (kept at
+                         # +bg_bound) so the rate-neutral projection has
+                         # slack to balance the per-CTU sum even at QP=42
+                         # on dense scenes (PROJECT_STATE §7.20.3 fix).

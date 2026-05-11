@@ -266,6 +266,12 @@ def main() -> None:
     parser.add_argument("--og-min-prot-ceil",   type=float, default=2.2)
     parser.add_argument("--og-min-prot-slope",  type=float, default=0.08)
     parser.add_argument("--og-min-prot-eta",    type=float, default=0.7)
+    parser.add_argument("--og-g-min-protect",   type=float, default=0.10,
+                        help="CTUs with G ≤ this value are NOT hard-capped "
+                             "at -δ_min·G^η — they keep the global +bg_bound "
+                             "so the rate-neutral projection has slack. "
+                             "Default 0.10 (10 %% overlap = roughly half a "
+                             "CTU edge crossed).")
 
     args = parser.parse_args()
 
@@ -313,6 +319,7 @@ def main() -> None:
             floor=args.og_min_prot_floor,
             ceil=args.og_min_prot_ceil,
             eta=args.og_min_prot_eta,
+            g_min_protect=args.og_g_min_protect,
         )
         # Default frame-h/w from ctu_rows × ctu_size if not given.
         if args.frame_h <= 0:
@@ -581,20 +588,26 @@ def main() -> None:
             #    saturates at a bound). Returns an already-clipped map.
             #
             #    In OG modes the upper bound is **per-CTU**:
-            #        upper_c = min(+bg_bound,  -δ_min(Q_b)·G_c^η)   if G_c > 0
-            #                  +bg_bound                              else
-            #    so the projection's global shift cannot push protected
-            #    CTUs back above zero (PROJECT_STATE §7.20.1 / 7.20.2 —
-            #    the failure that the violation_max diagnostic caught
-            #    in pilot_v6_og: 0.33–1.00 instead of < 0.05).
+            #        upper_c = min(+bg_bound,  -δ_min(Q_b)·G_c^η)
+            #                  if G_c > g_min_protect (default 0.1)
+            #        upper_c = +bg_bound otherwise
+            #    so the projection's global shift cannot push strongly
+            #    protected CTUs back above zero, while weakly-overlapping
+            #    CTUs (~20 % of the grid in MOT17-09) still have positive
+            #    headroom for the projection to balance the rate sum.
+            #    Without this threshold the rate ratio drifts > 5 % at
+            #    QP=42 on MOT17-09 (PROJECT_STATE §7.20.3 fix).
             if args.mode in ("og_a_plus", "og_liteqp") and G_max_grid is not None:
                 delta_min_q = min_protection_floor(qp, og_min_cfg)
                 g_arr = np.clip(G_max_grid, 0.0, 1.0)
-                upper_per_ctu = np.minimum(
+                g_thresh = float(og_min_cfg.g_min_protect)
+                upper_per_ctu_protected = np.minimum(
                     clip_hi,
                     -delta_min_q * np.power(g_arr, og_min_cfg.eta),
                 )
-                upper_per_ctu = np.where(g_arr > 0.0, upper_per_ctu, clip_hi)
+                upper_per_ctu = np.where(g_arr > g_thresh,
+                                          upper_per_ctu_protected,
+                                          clip_hi)
                 delta_pred = project_rate_neutral_clipped_exact(
                     delta_pred, K_grid,
                     delta_min=clip_lo, delta_max=upper_per_ctu,
@@ -719,6 +732,7 @@ def main() -> None:
                 "ceil":  float(args.og_min_prot_ceil),
                 "slope": float(args.og_min_prot_slope),
                 "eta":   float(args.og_min_prot_eta),
+                "g_min_protect": float(args.og_g_min_protect),
             },
         }),
         "feature_names": FEATURE_NAMES,

@@ -452,6 +452,8 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
                 (og_cfg.get("min_protection") or {}).get("slope", 0.08)),
             "--og-min-prot-eta",   str(
                 (og_cfg.get("min_protection") or {}).get("eta",   0.7)),
+            "--og-g-min-protect",  str(
+                (og_cfg.get("min_protection") or {}).get("g_min_protect", 0.10)),
         ]
     # CNN inference device (default to whatever was used for training).
     if backend == "cnn":

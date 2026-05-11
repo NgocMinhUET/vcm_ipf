@@ -103,8 +103,14 @@ class MinProtectionConfig:
     * a half-occupying CTU (``G_c = 0.5``) gets ≈ -0.6 at ``Q_b = 27``
       (because of the ``η = 0.7`` exponent), growing to ≈ -1.4 at
       ``Q_b = 42``;
-    * boundary / weakly-occupying CTUs (``G_c < 0.1``) are essentially
-      unaffected (floor < -0.2).
+    * **weakly-overlapping** CTUs (``G_c ≤ G_min_protect``) are NOT
+      hard-capped at all — they get the regular ``+bg_bound`` and only
+      the soft context term in ``U_c`` nudges them. This was the
+      critical fix for the pilot_v6_og rate-ratio drift at QP=42 on
+      MOT17-09 (PROJECT_STATE §7.20.3 — without this gate the floor
+      ``floor(-δ_min · 0.05^0.7) = -1`` over-protected ~20 % of CTUs,
+      starving the rate-neutral projection of CTUs that could absorb
+      the positive shift).
     """
 
     # δ_min(Q_b) = clip(intercept + slope·(Q_b - 27), floor, ceil)
@@ -113,6 +119,10 @@ class MinProtectionConfig:
     floor:     float = 1.0
     ceil:      float = 2.2
     eta:       float = 0.7
+    # Minimum G_c to activate the per-CTU upper bound. Weakly-overlapping
+    # CTUs (G < this threshold) keep the global +bg_bound — they still
+    # benefit from the soft context term in U_c, but are not hard-capped.
+    g_min_protect: float = 0.10
 
 
 def min_protection_floor(q_base: int, cfg: Optional[MinProtectionConfig] = None
@@ -285,22 +295,27 @@ def end_to_end_og_a_plus(
     delta_p = apply_min_object_protection(delta_a, G_max, q_base, min_protect_cfg)
 
     # 3) Build per-CTU bounds. Lower bound is the global Q-adaptive
-    #    floor (tighter than the legal range). Upper bound at protected
-    #    CTUs is `-δ_min · G^η`, ensuring rate-neutral projection cannot
-    #    push them above zero (the §7.20 / Test 6 failure mode).
+    #    floor (tighter than the legal range). Upper bound at strongly
+    #    object-overlapping CTUs is `-δ_min · G^η`, ensuring rate-neutral
+    #    projection cannot push them above zero. Weakly-overlapping
+    #    CTUs (G ≤ g_min_protect) keep the global +bg_bound so the
+    #    rate-neutral projection still has slack to absorb the global
+    #    shift — without this gate, ~20 % of CTUs get hard-capped at
+    #    -1 even for trivial overlap, and the rate ratio drifts > 5 %
+    #    at high QP (PROJECT_STATE §7.20 — pilot_v6_og post-fix).
     roi_bound, bg_bound = q_adaptive_bounds(q_base)
     clip_lo = max(-roi_bound, float(delta_min_clip))
     clip_hi_global = min(+bg_bound, float(delta_max_clip))
     g_arr = np.clip(np.asarray(G_max, dtype=np.float64), 0.0, 1.0)
     delta_min_q = min_protection_floor(q_base, min_protect_cfg)
-    upper_per_ctu = np.minimum(
+    g_thresh = float(min_protect_cfg.g_min_protect)
+    upper_per_ctu_protected = np.minimum(
         clip_hi_global,
         -delta_min_q * np.power(g_arr, min_protect_cfg.eta),
     )
-    # Where G == 0 the upper-bound formula gives 0 (since 0^η = 0), but
-    # we want unprotected CTUs to keep the original +bg_bound ceiling
-    # so background can still be encoded *worse* than the anchor.
-    upper_per_ctu = np.where(g_arr > 0.0, upper_per_ctu, clip_hi_global)
+    upper_per_ctu = np.where(g_arr > g_thresh,
+                              upper_per_ctu_protected,
+                              clip_hi_global)
 
     # 4) Clipped exact rate-neutral projection (per-CTU bounds).
     delta_continuous = project_rate_neutral_clipped_exact(
