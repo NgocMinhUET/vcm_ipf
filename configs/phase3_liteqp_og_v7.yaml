@@ -1,0 +1,116 @@
+# =============================================================================
+# Phase 3 Stage C — OG-IPF v7: softer protection, high-QP-only activation.
+# =============================================================================
+# Motivation (pilot_v6_og findings, PROJECT_STATE §7.20.5):
+#
+#   pilot_v6_og showed REAL LOSS at QP=27 (d=−0.70 on MOT17-04) and
+#   REAL WIN at QP=37/42 (d=+0.34, +0.57). Root cause: the large per-CTU
+#   QP swing (object δ≈−3 to −4, bg δ≈+2 to +3 → total 5–7 QP units) at
+#   low base QP creates VTM intra-prediction discontinuities that degrade
+#   detector performance.
+#
+# Two targeted changes relative to v6:
+#   1. min_protection.floor: 0.0  → at QP=27, δ_min(27)=0, so the (★)
+#      hard cap is disabled (upper_per_ctu = 0 → every CTU can be 0 or
+#      positive, effectively making OG-IPF a no-op). OG-IPF activates
+#      naturally from QP=32 upward where floor=0+slope*(32-27)=0.4.
+#   2. min_protection.ceil:  1.5  → maximum protection depth is ≤1.5
+#      (was 2.2). At QP=42, δ_min=min(0+0.08*15,1.5)=1.2 instead of 2.2.
+#      This limits the maximum QP swing to ≈3–4 units (was 5–7), staying
+#      within VTM's deblocking filter compensation range.
+# =============================================================================
+
+output_root: "~/Minh/ipf/phase3_outputs"
+
+version: "og_v7"   # → oracle_liteqp_og_v7/ , liteqp_og_v7_<seq>/ ...
+
+pilot_summary: "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+
+qp_list:        [27, 32, 37, 42]
+delta_list:     [-8, -6, -4, -2, 0, 2, 4]
+residual_bound: 2.0
+
+sequences:
+  - name: "MOT17-04-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    width: 1920
+    height: 1152
+    n_frames: 50
+    fps: 30
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+# ── Step 1 — saliency + box persistence ──────────────────────────────────────
+saliency:
+  ctu_size: 128
+  blur_sigma: 8.0
+  batch_size: 32
+  detector: "yolov8n.pt"
+  confidence: 0.25
+  device: "cuda:0"
+
+# ── Step 3 — teacher Lagrangian (og_liteqp only) ─────────────────────────────
+teacher:
+  lambda_task:   5.0
+  lambda_anchor: 0.6
+  eta:           0.06
+  xi:            0.15
+
+teacher_overrides: {}
+
+# ── Action 4 — automatic per-sequence λ_task ─────────────────────────────────
+auto_lambda:
+  enabled:     true
+  source:      "~/Minh/ipf/phase2_outputs/pilot_v1/experiment_summary.json"
+  base_lambda: 5.0
+  alpha:       0.5
+  lambda_min:  3.5
+  lambda_max:  7.0
+  slope_mode:  "median"
+
+# ── Step 5 — MLP training (og_liteqp only) ───────────────────────────────────
+train:
+  cv: "both"
+  max_iter: 400
+  seed: 20260508
+  n_bootstrap: 500
+  bootstrap_alpha: 0.05
+
+# ── Step 6 — apply OG-IPF ────────────────────────────────────────────────────
+apply:
+  mode: "og_a_plus"
+  q_aware_bound:
+    enabled: false
+    slope: 0.04
+    lo: 1.4
+    hi: 2.2
+
+# ── OG-IPF hyper-parameters (v7 — softer schedule) ───────────────────────────
+og:
+  detector_classes: [0]
+  lambda_ctu: 0.4
+  lambda_obj: 0.6
+  gamma:      0.0
+  alpha_in:   1.0
+  alpha_ctx:  0.3
+  aggregator: "max"
+  p_norm:     4.0
+  min_protection:
+    floor: 0.0   # δ_min(27)=0 → OG-IPF is a near-no-op at QP=27
+                 # δ_min(32)=0.4, δ_min(37)=0.8, δ_min(42)=1.2
+    ceil:  1.5   # reduced from 2.2 → limits max QP swing to ≈3–4 units
+    slope: 0.08  # δ_min(Q_b) = clip(floor + slope·(Q_b-27), floor, ceil)
+    eta:   0.7
+    g_min_protect: 0.20

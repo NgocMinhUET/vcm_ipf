@@ -1,0 +1,68 @@
+# =============================================================================
+# Phase 2 Pilot v7-OG — M0 vs M4-OG (softer protection, PROJECT_STATE §7.20.5)
+# =============================================================================
+# Addresses pilot_v6_og regression at low QP (REAL LOSS d=−0.70 at QP=27).
+# Uses phase3_liteqp_og_v7.yaml (floor=0.0, ceil=1.5) which:
+#   - disables OG-IPF hard protection at QP=27 (δ_min=0 → no-op)
+#   - limits max QP swing to ≈3–4 units at QP=42 (was 5–7)
+# =============================================================================
+
+experiment_id: "pilot_v7_og"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg:  "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+encoding:
+  qp_points: [27, 32, 37, 42]
+  methods: ["M0", "M4"]
+  phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
+  phase1_run_prefix: "liteqp_og_v7_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: false
+  compute_task_accuracy: true
+  detector_model: "yolov8n.pt"
+  detector_confidence: 0.25
+  detector_conf_low: 0.001
+  detector_classes: [0]
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
