@@ -61,6 +61,7 @@ from phase2.phase3.og_ipf import (  # noqa: E402
     compute_og_diagnostics,
     end_to_end_og_a_plus,
     min_protection_floor,
+    protection_activation,
 )
 
 
@@ -184,6 +185,7 @@ def t05_rate_neutral_continuous() -> None:
 # ---------------------------------------------------------------------------
 
 def t06_protection_violation() -> None:
+    """At QP=42 activation=1.0, protected CTUs must have δ < 0."""
     rng = np.random.default_rng(11)
     U = rng.exponential(1.0, size=(9, 15))
     K = rng.exponential(1.0, size=(9, 15))
@@ -191,16 +193,20 @@ def t06_protection_violation() -> None:
     # Two CTUs strongly overlap an object.
     G_max[3, 5] = 0.9
     G_max[4, 6] = 0.95
-    out = end_to_end_og_a_plus(U=U, G_max=G_max, K=K, q_base=32)
+    # Use q_base=42 where activation=1.0 so protection is fully active.
+    out = end_to_end_og_a_plus(U=U, G_max=G_max, K=K, q_base=42)
     diag = compute_og_diagnostics(
         delta_continuous=out.delta_continuous,
         delta_int=out.delta_int.astype(np.float64),
         G_max=G_max, K=K,
+        activation_factor=out.activation_factor,
     )
     ok = diag.object_protection_violation <= 0.05
     _result(
-        "06 object-protection violation ≤ 5 % when G > 0.5 CTUs are protected",
-        ok, f"violation={diag.object_protection_violation:.4f}",
+        "06 object-protection violation ≤ 5 % when G > 0.5 CTUs are protected "
+        "(QP=42, activation=1.0)",
+        ok, f"violation={diag.object_protection_violation:.4f} "
+            f"act={out.activation_factor:.2f}",
     )
 
 
@@ -274,16 +280,18 @@ def t08_apply_smoke() -> None:
         cmd = [
             sys.executable, "-m", "phase2.phase3.apply_liteqp_model",
             "--mode", "og_a_plus",
-            "--rate-npz", str(rate_npz),
+            "--rate-npz",   str(rate_npz),
             "--saliency-dir", str(sal),
-            "--boxes-dir",    str(sal),
-            "--output-dir",   str(out_dir),
+            "--boxes-dir",  str(sal),
+            "--output-dir", str(out_dir),
             "--qp-list", "27", "32", "37", "42",
             "--n-frames", str(n_frames),
             "--ctu-rows", str(ctu_rows),
             "--ctu-cols", str(ctu_cols),
-            "--frame-h",  str(ctu_rows * 128),
-            "--frame-w",  str(ctu_cols * 128),
+            "--frame-h",   str(ctu_rows * 128),   # padded: 1152
+            "--frame-w",   str(ctu_cols * 128),   # padded: 1920
+            "--visible-h", str(ctu_rows * 128 - 72),  # 1080 (simulates real MOT17)
+            "--visible-w", str(ctu_cols * 128),
             "--per-qp",
         ]
         env = {**__import__("os").environ, "PYTHONPATH": str(SRC)}
@@ -342,6 +350,175 @@ def t08_apply_smoke() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 10: protection_activation schedule
+# ---------------------------------------------------------------------------
+
+def t10_activation_schedule() -> None:
+    """Default config: QP=27/32 → 0.0, QP=37 → 0.5, QP=42 → 1.0."""
+    cfg = MinProtectionConfig()  # activation_q0=32, activation_q1=42
+    a27 = protection_activation(27, cfg)
+    a32 = protection_activation(32, cfg)
+    a37 = protection_activation(37, cfg)
+    a42 = protection_activation(42, cfg)
+    ok = (
+        abs(a27 - 0.0) < 1e-9
+        and abs(a32 - 0.0) < 1e-9
+        and abs(a37 - 0.5) < 1e-9
+        and abs(a42 - 1.0) < 1e-9
+    )
+    _result(
+        "10 protection_activation: QP27=0, QP32=0, QP37=0.5, QP42=1",
+        ok, f"a27={a27:.4f} a32={a32:.4f} a37={a37:.4f} a42={a42:.4f}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: padded 1152 / visible 1080 CTU geometry
+# ---------------------------------------------------------------------------
+
+def t11_padded_visible_ctu_dims() -> None:
+    """1152-padded / 1080-visible: 9 CTU rows, bottom row visible height = 56 px.
+
+    Row 8 (0-indexed) spans pixels [1024, 1152) in the padded grid, but
+    the visible clip is 1080, so its effective visible height is 56 pixels.
+    """
+    from phase2.phase3.occupancy import make_ctu_grid, _ctu_box_corners
+
+    frame_h, visible_h = 1152, 1080
+    frame_w, visible_w = 1920, 1920
+    ctu_size = 128
+
+    _, _, n_rows, n_cols = make_ctu_grid(frame_h, frame_w, ctu_size)
+    # Corners clipped to PADDED dims (old behaviour)
+    x1p, y1p, x2p, y2p = _ctu_box_corners(
+        n_rows, n_cols, ctu_size, frame_h, frame_w)
+    # Corners clipped to VISIBLE dims (new behaviour via visible_h)
+    x1v, y1v, x2v, y2v = _ctu_box_corners(
+        n_rows, n_cols, ctu_size, visible_h, visible_w)
+
+    ok_rows = (n_rows == 9)
+    # Bottom-row padded height  = 1152 - 1024 = 128 (full CTU)
+    # Bottom-row visible height = 1080 - 1024 = 56
+    bottom_h_padded  = float(y2p[8, 0] - y1p[8, 0])
+    bottom_h_visible = float(y2v[8, 0] - y1v[8, 0])
+    ok_pad = abs(bottom_h_padded  - 128.0) < 1e-6
+    ok_vis = abs(bottom_h_visible -  56.0) < 1e-6
+
+    # compute_occupancy_utility with visible_h should use 56-px last row
+    box = ObjectBox(x=0.0, y=1024.0, w=100.0, h=56.0)  # sits in row 8
+    from phase2.phase3.occupancy import compute_occupancy_utility
+    res_pad = compute_occupancy_utility([box], frame_h=frame_h, frame_w=frame_w)
+    res_vis = compute_occupancy_utility([box], frame_h=frame_h, frame_w=frame_w,
+                                        visible_h=visible_h, visible_w=visible_w)
+    # With padded dims CTU-8 area = 128×128 → A^ctu = 100*56/(128*128) ≈ 0.034
+    # With visible dims CTU-8 area = 56×128  → A^ctu = 100*56/(56*128) ≈ 0.781
+    # So G should be strictly higher in the visible case.
+    g_pad = float(res_pad.G_max[8, 0])
+    g_vis = float(res_vis.G_max[8, 0])
+    ok_g = g_vis > g_pad + 0.1  # visible_h gives meaningfully higher occupancy
+
+    ok = ok_rows and ok_pad and ok_vis and ok_g
+    _result(
+        "11 padded 1152 / visible 1080: 9 rows, bottom-row h_vis=56, "
+        "G_vis > G_pad at boundary CTU",
+        ok,
+        f"n_rows={n_rows} h_pad={bottom_h_padded:.0f} h_vis={bottom_h_visible:.0f} "
+        f"G_pad={g_pad:.4f} G_vis={g_vis:.4f}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: og_a_plus smoke uses end_to_end_og_a_plus path
+#          (activation_factor appears in the diagnostics CSV)
+# ---------------------------------------------------------------------------
+
+def t12_og_a_plus_uses_e2e_path() -> None:
+    """Verify the apply script records activation_factor for og_a_plus.
+
+    We run a 5-frame og_a_plus smoke with QP=42 (activation=1.0) and
+    QP=27 (activation=0.0). The mean_activation_factor column in the
+    diagnostics CSV must equal 1.0 at QP=42 and 0.0 at QP=27 (default
+    schedule). If the column is absent or wrong, the script was NOT
+    using end_to_end_og_a_plus().
+    """
+    with tempfile.TemporaryDirectory() as td:
+        td_p = Path(td)
+        sal = td_p / "sal"; sal.mkdir()
+        rate_npz = td_p / "rate.npz"
+        out_dir  = td_p / "M4"
+
+        ctu_rows, ctu_cols = 9, 15
+        n_frames = 5
+        K = np.exp(np.random.default_rng(99).normal(
+            0, 0.3, size=(n_frames, ctu_rows, ctu_cols)))
+        np.savez(rate_npz, K_grids=K)
+        for fi in range(n_frames):
+            np.save(sal / f"phi_oracle_{fi:06d}.npy",
+                     np.random.default_rng(fi).uniform(
+                         size=(ctu_rows, ctu_cols)).astype(np.float32))
+            box = {"xyxy": [640.0, 384.0, 1024.0, 640.0],
+                   "score": 0.9, "class": 0, "class_priority": 1.0}
+            payload = {"frame_idx": fi, "boxes": [box]}
+            (sal / f"boxes_{fi:06d}.json").write_text(
+                json.dumps(payload), encoding="utf-8")
+
+        cmd = [
+            sys.executable, "-m", "phase2.phase3.apply_liteqp_model",
+            "--mode", "og_a_plus",
+            "--rate-npz",   str(rate_npz),
+            "--saliency-dir", str(sal),
+            "--boxes-dir",  str(sal),
+            "--output-dir", str(out_dir),
+            "--qp-list", "27", "42",
+            "--n-frames", str(n_frames),
+            "--ctu-rows", str(ctu_rows),
+            "--ctu-cols", str(ctu_cols),
+            "--frame-h",  str(ctu_rows * 128),
+            "--frame-w",  str(ctu_cols * 128),
+            "--visible-h", "1080",
+            "--visible-w", "1920",
+            "--og-activation-q0", "32.0",
+            "--og-activation-q1", "42.0",
+            "--og-activation-min", "0.0",
+            "--og-activation-max", "1.0",
+            "--per-qp",
+        ]
+        env = {**__import__("os").environ, "PYTHONPATH": str(SRC)}
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if proc.returncode != 0:
+            _result("12 og_a_plus uses end_to_end path (activation_factor in CSV)",
+                     False, f"script failed:\n{proc.stderr[-800:]}")
+            return
+
+        csv_path = out_dir / "og_diagnostics_summary.csv"
+        if not csv_path.exists():
+            _result("12 og_a_plus uses end_to_end path (activation_factor in CSV)",
+                     False, "CSV not written")
+            return
+
+        import csv as _csv
+        act_by_qp: dict[int, float] = {}
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            if "mean_activation_factor" not in (reader.fieldnames or []):
+                _result("12 og_a_plus uses end_to_end path (activation_factor in CSV)",
+                         False, "column mean_activation_factor absent from CSV")
+                return
+            for row in reader:
+                qp_v = int(row["qp_base"])
+                act_by_qp[qp_v] = float(row["mean_activation_factor"])
+
+        act27 = act_by_qp.get(27, -1.0)
+        act42 = act_by_qp.get(42, -1.0)
+        ok = abs(act27 - 0.0) < 1e-6 and abs(act42 - 1.0) < 1e-6
+        _result(
+            "12 og_a_plus uses end_to_end path (activation_factor in CSV)",
+            ok,
+            f"act@QP27={act27:.4f} (expect 0.0), act@QP42={act42:.4f} (expect 1.0)",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -354,6 +531,9 @@ def main() -> int:
     t06_protection_violation()
     t07_objectbox_loaders()
     t08_apply_smoke()
+    t10_activation_schedule()
+    t11_padded_visible_ctu_dims()
+    t12_og_a_plus_uses_e2e_path()
     print()
     print(f"PASSED: {len(PASSED)} / {len(PASSED) + len(FAILED)}")
     return 0 if not FAILED else 1

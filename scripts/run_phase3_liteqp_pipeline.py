@@ -405,6 +405,10 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
     qp_list = [str(q) for q in cfg["qp_list"]]
     h = int(seq.get("height", 1152))
     w = int(seq.get("width", 1920))
+    # original_height/width are the visible (unpadded) dimensions.
+    # Fall back to padded height/width when not specified.
+    vis_h = int(seq.get("original_height", h))
+    vis_w = int(seq.get("original_width",  w))
     nrow = (h + 127) // 128
     ncol = (w + 127) // 128
     target_dir = out_root / "learned" / f"liteqp{sfx}_{seq['name']}" / "M4"
@@ -431,11 +435,14 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
     # OG-IPF arguments (PROJECT_STATE §7.20).
     if mode in ("og_a_plus", "og_liteqp"):
         og_cfg = cfg.get("og", {}) or {}
+        mp = og_cfg.get("min_protection") or {}
         boxes_dir = out_root / "saliency" / seq["name"]
         cmd += [
             "--boxes-dir", str(boxes_dir),
             "--frame-h",   str(h),
             "--frame-w",   str(w),
+            "--visible-h", str(vis_h),
+            "--visible-w", str(vis_w),
             "--ctu-size",  "128",
             "--og-lambda-ctu", str(og_cfg.get("lambda_ctu", 0.4)),
             "--og-lambda-obj", str(og_cfg.get("lambda_obj", 0.6)),
@@ -444,16 +451,15 @@ def step_apply(cfg, seq, model_path: Path, out_root: Path) -> None:
             "--og-alpha-ctx",   str(og_cfg.get("alpha_ctx",  0.3)),
             "--og-aggregator",  str(og_cfg.get("aggregator", "max")),
             "--og-p-norm",      str(og_cfg.get("p_norm",     4.0)),
-            "--og-min-prot-floor", str(
-                (og_cfg.get("min_protection") or {}).get("floor", 1.0)),
-            "--og-min-prot-ceil",  str(
-                (og_cfg.get("min_protection") or {}).get("ceil",  2.2)),
-            "--og-min-prot-slope", str(
-                (og_cfg.get("min_protection") or {}).get("slope", 0.08)),
-            "--og-min-prot-eta",   str(
-                (og_cfg.get("min_protection") or {}).get("eta",   0.7)),
-            "--og-g-min-protect",  str(
-                (og_cfg.get("min_protection") or {}).get("g_min_protect", 0.10)),
+            "--og-min-prot-floor", str(mp.get("floor",        1.0)),
+            "--og-min-prot-ceil",  str(mp.get("ceil",         2.2)),
+            "--og-min-prot-slope", str(mp.get("slope",        0.08)),
+            "--og-min-prot-eta",   str(mp.get("eta",          0.7)),
+            "--og-g-min-protect",  str(mp.get("g_min_protect", 0.10)),
+            "--og-activation-q0",  str(mp.get("activation_q0",  32.0)),
+            "--og-activation-q1",  str(mp.get("activation_q1",  42.0)),
+            "--og-activation-min", str(mp.get("activation_min",  0.0)),
+            "--og-activation-max", str(mp.get("activation_max",  1.0)),
         ]
     # CNN inference device (default to whatever was used for training).
     if backend == "cnn":
@@ -555,8 +561,12 @@ def main() -> None:
         for seq in sequences:
             step_apply(cfg, seq, model_path, out_root)
 
-    encode_yaml = "phase2/configs/pilot_v5.yaml" if sfx == "_v2" \
-        else "phase2/configs/pilot_v4.yaml"
+    if sfx == "_og":
+        encode_yaml = "phase2/configs/pilot_v6_og.yaml"
+    elif sfx == "_v2":
+        encode_yaml = "phase2/configs/pilot_v5.yaml"
+    else:
+        encode_yaml = "phase2/configs/pilot_v4.yaml"
     LOG.info("Stage C%s complete. Encode with %s.",
              sfx if sfx else "", encode_yaml)
 

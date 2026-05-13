@@ -31,7 +31,9 @@ residual_bound: 2.0     # cap on |MLP residual| in og_liteqp mode
 sequences:
   - name: "MOT17-04-DPM"
     width: 1920
-    height: 1152
+    height: 1152         # padded to next multiple of 128
+    original_width:  1920
+    original_height: 1080  # true visible luma height
     n_frames: 50
     fps: 30
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
@@ -39,6 +41,8 @@ sequences:
   - name: "MOT17-09-DPM"
     width: 1920
     height: 1152
+    original_width:  1920
+    original_height: 1080
     n_frames: 50
     fps: 30
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
@@ -46,6 +50,8 @@ sequences:
   - name: "MOT17-02-DPM"
     width: 1920
     height: 1152
+    original_width:  1920
+    original_height: 1080
     n_frames: 50
     fps: 30
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
@@ -125,3 +131,9 @@ og:
                          # higher K than pure bg and make the post-rounding
                          # correction effective for sparse scenes (MOT17-09
                          # QP=42 rate_ratio 1.062 → target ≤ 1.05).
+    # Compression-aware activation: a(Q_b) = clip((Q_b-q0)/(q1-q0), min, max)
+    # QP≤32 → 0.0 (near-no-op), QP=37 → 0.5, QP=42 → 1.0 (full protection).
+    activation_q0:  32.0
+    activation_q1:  42.0
+    activation_min:  0.0
+    activation_max:  1.0

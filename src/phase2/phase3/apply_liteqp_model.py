@@ -58,10 +58,13 @@ from phase2.phase3.occupancy import (
 )
 from phase2.phase3.og_ipf import (
     MinProtectionConfig,
+    OGAPlusOutput,
     apply_min_object_protection,
     compute_og_a_plus_delta,
     compute_og_diagnostics,
+    end_to_end_og_a_plus,
     min_protection_floor,
+    protection_activation,
 )
 
 logger = logging.getLogger("phase2.phase3.apply_liteqp_model")
@@ -246,11 +249,18 @@ def main() -> None:
                              "(written by `phase2.phase3.save_boxes`). "
                              "Required for --mode og_a_plus and og_liteqp.")
     parser.add_argument("--frame-h", type=int, default=0,
-                        help="Frame height in pixels (used by OG-IPF for "
-                             "CTU-grid clipping). If 0, derived from "
-                             "ctu_rows × ctu_size.")
+                        help="Padded frame height in pixels (VVC CTU grid). "
+                             "If 0, derived from ctu_rows × ctu_size.")
     parser.add_argument("--frame-w", type=int, default=0,
-                        help="Frame width in pixels.")
+                        help="Padded frame width in pixels.")
+    parser.add_argument("--visible-h", type=int, default=0,
+                        help="Visible (unpadded) frame height in pixels used "
+                             "to clip CTU box corners when computing overlap "
+                             "areas. If 0, falls back to --frame-h. "
+                             "Example: 1080 when --frame-h 1152.")
+    parser.add_argument("--visible-w", type=int, default=0,
+                        help="Visible (unpadded) frame width in pixels. "
+                             "If 0, falls back to --frame-w.")
     parser.add_argument("--ctu-size", type=int, default=128,
                         help="CTU side length in pixels (default 128).")
     parser.add_argument("--og-lambda-ctu", type=float, default=0.4)
@@ -272,6 +282,16 @@ def main() -> None:
                              "so the rate-neutral projection has slack. "
                              "Default 0.10 (10 %% overlap = roughly half a "
                              "CTU edge crossed).")
+    # Compression-aware activation schedule (MinProtectionConfig).
+    # Default: QP ≤ 32 → a=0, QP=37 → a=0.5, QP=42 → a=1.
+    parser.add_argument("--og-activation-q0",  type=float, default=32.0,
+                        help="QP at which activation starts (default 32.0).")
+    parser.add_argument("--og-activation-q1",  type=float, default=42.0,
+                        help="QP at which activation reaches max (default 42.0).")
+    parser.add_argument("--og-activation-min", type=float, default=0.0,
+                        help="Minimum activation value (default 0.0).")
+    parser.add_argument("--og-activation-max", type=float, default=1.0,
+                        help="Maximum activation value (default 1.0).")
 
     args = parser.parse_args()
 
@@ -320,20 +340,32 @@ def main() -> None:
             ceil=args.og_min_prot_ceil,
             eta=args.og_min_prot_eta,
             g_min_protect=args.og_g_min_protect,
+            activation_q0=args.og_activation_q0,
+            activation_q1=args.og_activation_q1,
+            activation_min=args.og_activation_min,
+            activation_max=args.og_activation_max,
         )
-        # Default frame-h/w from ctu_rows × ctu_size if not given.
+        # Default padded frame-h/w from ctu_rows × ctu_size if not given.
         if args.frame_h <= 0:
             args.frame_h = args.ctu_rows * args.ctu_size
         if args.frame_w <= 0:
             args.frame_w = args.ctu_cols * args.ctu_size
-        logger.info("OG-IPF mode=%s: boxes_dir=%s, frame=%dx%d, "
-                     "λ_ctu=%.2f λ_obj=%.2f γ=%.2f α_in=%.2f α_ctx=%.2f "
-                     "min_prot[floor=%.2f, ceil=%.2f, slope=%.3f, η=%.2f]",
-                     args.mode, boxes_dir, args.frame_h, args.frame_w,
-                     og_cfg.lambda_ctu, og_cfg.lambda_obj, og_cfg.gamma,
-                     og_cfg.alpha_in, og_cfg.alpha_ctx,
-                     og_min_cfg.floor, og_min_cfg.ceil,
-                     og_min_cfg.slope, og_min_cfg.eta)
+        _vis_h = args.visible_h if args.visible_h > 0 else args.frame_h
+        _vis_w = args.visible_w if args.visible_w > 0 else args.frame_w
+        logger.info(
+            "OG-IPF mode=%s: boxes_dir=%s, frame=%dx%d (visible=%dx%d), "
+            "λ_ctu=%.2f λ_obj=%.2f γ=%.2f α_in=%.2f α_ctx=%.2f "
+            "min_prot[floor=%.2f, ceil=%.2f, slope=%.3f, η=%.2f] "
+            "activation[q0=%.1f, q1=%.1f, min=%.2f, max=%.2f]",
+            args.mode, boxes_dir, args.frame_h, args.frame_w,
+            _vis_h, _vis_w,
+            og_cfg.lambda_ctu, og_cfg.lambda_obj, og_cfg.gamma,
+            og_cfg.alpha_in, og_cfg.alpha_ctx,
+            og_min_cfg.floor, og_min_cfg.ceil,
+            og_min_cfg.slope, og_min_cfg.eta,
+            og_min_cfg.activation_q0, og_min_cfg.activation_q1,
+            og_min_cfg.activation_min, og_min_cfg.activation_max,
+        )
 
     # ── Load model (mode=liteqp / cnn_* / og_liteqp) ───────────────────────
     # ``pipeline`` (sklearn MLP) and ``cnn_model`` (PyTorch nn.Module) are
@@ -464,18 +496,14 @@ def main() -> None:
             # ── Build phi_norm + (optionally) U_c / G_c_max ─────────────
             if args.mode in ("og_a_plus", "og_liteqp"):
                 # OG-IPF: load per-frame YOLO boxes and compute U_c, G_c_max.
-                # We *also* load Φ_oracle for the MLP feature stack in
-                # og_liteqp; the MLP residual still operates on the same
-                # 9-feature vector as plain liteqp for parity, with `phi`
-                # replaced by U_c (normalised to [0,1] via percentile).
                 boxes = load_boxes_for_frame(boxes_dir, fi)
                 og = compute_occupancy_utility(
                     boxes,
                     frame_h=args.frame_h, frame_w=args.frame_w,
+                    visible_h=args.visible_h if args.visible_h > 0 else None,
+                    visible_w=args.visible_w if args.visible_w > 0 else None,
                     ctu_size=args.ctu_size, cfg=og_cfg,
                 )
-                # The util signal is unbounded; percentile-normalise to [0,1]
-                # for the MLP feature vector and downstream consistency.
                 U_norm = _percentile_norm(og.U)
                 G_max_grid = og.G_max
                 if og.U.shape != (args.ctu_rows, args.ctu_cols):
@@ -483,15 +511,60 @@ def main() -> None:
                         "frame %06d: OG-IPF grid shape %s ≠ %s — skipping",
                         fi, og.U.shape, (args.ctu_rows, args.ctu_cols))
                     continue
-                # 1) OG-A+ analytic prior on U_c (NOT on Φ).
-                delta_a = compute_og_a_plus_delta(og.U, K_grid, qp, cfg)
-                # 2) Min-object-protection — applied BEFORE projection so
-                #    rate-neutrality is restored after the constraint nudges
-                #    object-CTUs further negative.
+
+                if args.mode == "og_a_plus":
+                    # ── End-to-end OG allocation (no manual composition) ──
+                    # end_to_end_og_a_plus handles: analytic prior →
+                    # activation attenuation → min-protection → per-CTU
+                    # clipped rate-neutral projection → integer rounding.
+                    og_a_out = end_to_end_og_a_plus(
+                        U=og.U, G_max=og.G_max, K=K_grid, q_base=qp,
+                        cfg=cfg, min_protect_cfg=og_min_cfg,
+                        delta_min_clip=int(cfg.delta_min_clip),
+                        delta_max_clip=int(cfg.delta_max_clip),
+                    )
+                    ratios_pre_round.append(og_a_out.rate_ratio_continuous)
+                    ratios_post_round.append(og_a_out.rate_ratio_rounded)
+                    diag = compute_og_diagnostics(
+                        delta_continuous=og_a_out.delta_continuous,
+                        delta_int=og_a_out.delta_int.astype(np.float64),
+                        G_max=G_max_grid, K=K_grid,
+                        delta_min_clip=float(cfg.delta_min_clip),
+                        delta_max_clip=float(cfg.delta_max_clip),
+                        rate_ratio_continuous=og_a_out.rate_ratio_continuous,
+                        rate_ratio_rounded=og_a_out.rate_ratio_rounded,
+                        activation_factor=og_a_out.activation_factor,
+                    )
+                    og_diagnostics_log.append({
+                        "frame_idx": fi, "qp_base": int(qp),
+                        "n_ctus_total":            diag.n_ctus_total,
+                        "pct_object_overlap":      diag.pct_object_overlap,
+                        "pct_context":             diag.pct_context,
+                        "pct_far_background":      diag.pct_far_background,
+                        "mean_delta_object":       diag.mean_delta_object,
+                        "mean_delta_context":      diag.mean_delta_context,
+                        "mean_delta_far_bg":       diag.mean_delta_far_background,
+                        "saturation_lower":        diag.saturation_lower,
+                        "saturation_upper":        diag.saturation_upper,
+                        "rate_ratio_continuous":   diag.rate_ratio_continuous,
+                        "rate_ratio_rounded":      diag.rate_ratio_rounded,
+                        "object_protection_violation": diag.object_protection_violation,
+                        "activation_factor":       og_a_out.activation_factor,
+                    })
+                    _write_delta_map(
+                        og_a_out.delta_int, qp_dir / f"qp_{fi:06d}.txt", fi)
+                    prev_delta = og_a_out.delta_int.astype(np.float64)
+                    n_total_written += 1
+                    continue  # ← skip the rest of the frame loop
+
+                # og_liteqp: activation-scaled analytic prior, then MLP residual.
+                _act = protection_activation(qp, og_min_cfg)
+                delta_a_raw = compute_og_a_plus_delta(og.U, K_grid, qp, cfg)
+                delta_a = _act * delta_a_raw
                 delta_a = apply_min_object_protection(
                     delta_a, og.G_max, qp, og_min_cfg)
                 delta_a = project_rate_neutral_exact(delta_a, K_grid)
-                phi_norm = U_norm  # used by og_liteqp's MLP features
+                phi_norm = U_norm  # MLP feature input
             else:
                 sal_path = sal_dir / f"phi_oracle_{fi:06d}.npy"
                 if not sal_path.exists():
@@ -696,8 +769,9 @@ def main() -> None:
                                     cfg.delta_min_clip, cfg.delta_max_clip)
             ratios_post_round.append(rate_neutral_residual(delta_int, K_grid))
 
-            # OG diagnostics (PROJECT_STATE §7.20 / §9 of user spec).
-            if args.mode in ("og_a_plus", "og_liteqp") and G_max_grid is not None:
+            # OG diagnostics for og_liteqp (og_a_plus already handled above).
+            if args.mode == "og_liteqp" and G_max_grid is not None:
+                _act_liteqp = protection_activation(qp, og_min_cfg)
                 diag = compute_og_diagnostics(
                     delta_continuous=delta_pred,
                     delta_int=delta_int,
@@ -707,6 +781,7 @@ def main() -> None:
                     delta_max_clip=float(cfg.delta_max_clip),
                     rate_ratio_continuous=ratios_pre_round[-1],
                     rate_ratio_rounded=ratios_post_round[-1],
+                    activation_factor=_act_liteqp,
                 )
                 og_diagnostics_log.append({
                     "frame_idx": fi, "qp_base": int(qp),
@@ -722,6 +797,7 @@ def main() -> None:
                     "rate_ratio_continuous":   diag.rate_ratio_continuous,
                     "rate_ratio_rounded":      diag.rate_ratio_rounded,
                     "object_protection_violation": diag.object_protection_violation,
+                    "activation_factor":       _act_liteqp,
                 })
 
             _write_delta_map(delta_int, qp_dir / f"qp_{fi:06d}.txt", fi)
@@ -786,12 +862,20 @@ def main() -> None:
             "alpha_ctx":  float(args.og_alpha_ctx),
             "aggregator": str(args.og_aggregator),
             "p_norm":     float(args.og_p_norm),
+            "frame_h":    int(args.frame_h),
+            "frame_w":    int(args.frame_w),
+            "visible_h":  int(args.visible_h) if args.visible_h > 0 else int(args.frame_h),
+            "visible_w":  int(args.visible_w) if args.visible_w > 0 else int(args.frame_w),
             "min_protection": {
-                "floor": float(args.og_min_prot_floor),
-                "ceil":  float(args.og_min_prot_ceil),
-                "slope": float(args.og_min_prot_slope),
-                "eta":   float(args.og_min_prot_eta),
-                "g_min_protect": float(args.og_g_min_protect),
+                "floor":          float(args.og_min_prot_floor),
+                "ceil":           float(args.og_min_prot_ceil),
+                "slope":          float(args.og_min_prot_slope),
+                "eta":            float(args.og_min_prot_eta),
+                "g_min_protect":  float(args.og_g_min_protect),
+                "activation_q0":  float(args.og_activation_q0),
+                "activation_q1":  float(args.og_activation_q1),
+                "activation_min": float(args.og_activation_min),
+                "activation_max": float(args.og_activation_max),
             },
         }),
         "feature_names": FEATURE_NAMES,
@@ -833,12 +917,13 @@ def main() -> None:
                 "mean_rate_ratio_continuous",
                 "mean_rate_ratio_rounded",
                 "object_protection_violation_max",
+                "mean_activation_factor",
             ])
             for qp_v in sorted(agg):
                 rows = agg[qp_v]
                 def _avg(key: str) -> float:
                     vals = [float(r[key]) for r in rows
-                            if r[key] == r[key]]  # drop NaN
+                            if r.get(key) == r.get(key)]  # drop NaN / missing
                     return float(np.mean(vals)) if vals else float("nan")
                 w.writerow([
                     qp_v, len(rows),
@@ -854,6 +939,7 @@ def main() -> None:
                     _avg("rate_ratio_rounded"),
                     max((float(r["object_protection_violation"])
                           for r in rows), default=0.0),
+                    _avg("activation_factor"),
                 ])
         logger.info("Wrote OG diagnostics summary to %s", csv_path)
         # Hard-fail soft warning: object-protection violation is the headline

@@ -314,6 +314,8 @@ def compute_occupancy_utility(
     ctu_size: int = 128,
     cfg: Optional[OGConfig] = None,
     *,
+    visible_h: Optional[int] = None,
+    visible_w: Optional[int] = None,
     return_per_object: bool = False,
 ) -> OccupancyResult:
     """Compute the OG-IPF utility and occupancy maps for one frame.
@@ -324,8 +326,18 @@ def compute_occupancy_utility(
         Iterable of :class:`ObjectBox`. Boxes with non-positive area
         are silently dropped (consistent with Phase 1's behaviour).
     frame_h, frame_w
-        Frame size in pixels (used to clip CTUs at the right/bottom
-        edge for non-multiple resolutions).
+        **Padded** frame size in pixels — used to build the CTU grid
+        via :func:`make_ctu_grid`.  For VVC streams whose luma height
+        is not a multiple of ``ctu_size``, ``frame_h`` is the padded
+        multiple (e.g. 1152 for a 1080-line source).
+    visible_h, visible_w
+        **Visible** (unpadded) frame dimensions in pixels.  When
+        supplied, CTU box corners are clipped to these bounds instead
+        of the padded ``frame_h / frame_w`` bounds.  This prevents
+        the bottom / right boundary CTUs from being assigned
+        artificially large areas, which would under-weight any bboxes
+        near the visible edge.  If ``None`` (default), falls back to
+        ``frame_h / frame_w`` for backward compatibility.
     ctu_size
         Side length of one CTU in pixels (128 in our pipeline).
     cfg
@@ -351,9 +363,14 @@ def compute_occupancy_utility(
     is ≈ 2 ms / frame on a laptop.
     """
     cfg = cfg or OGConfig()
+    # Padded dims drive the CTU grid (n_rows / n_cols); visible dims
+    # clip individual CTU box corners so the bottom / right boundary
+    # CTUs report their true visible area when computing overlap.
+    clip_h = int(visible_h) if (visible_h is not None and visible_h > 0) else frame_h
+    clip_w = int(visible_w) if (visible_w is not None and visible_w > 0) else frame_w
     grid_x, grid_y, n_rows, n_cols = make_ctu_grid(frame_h, frame_w, ctu_size)
     ctu_x1, ctu_y1, ctu_x2, ctu_y2 = _ctu_box_corners(
-        n_rows, n_cols, ctu_size, frame_h, frame_w)
+        n_rows, n_cols, ctu_size, clip_h, clip_w)
 
     # Filter zero-area boxes upfront — these would only inject NaN.
     valid_boxes: List[ObjectBox] = [b for b in boxes if b.w > 0 and b.h > 0]
