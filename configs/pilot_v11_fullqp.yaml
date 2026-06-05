@@ -39,51 +39,79 @@ vtm:
 sequences:
   - name: "MOT17-02-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
     split: "dev"
 
   - name: "MOT17-04-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
     split: "dev"
 
   - name: "MOT17-05-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-05-DPM.yuv"
-    width: 640; height: 480; original_width: 640; original_height: 480
-    fps: 14; n_frames: 50
+    width: 640
+    height: 480
+    original_width: 640
+    original_height: 480
+    fps: 14
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-05-DPM/img1"
     split: "dev"
 
   - name: "MOT17-09-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
     split: "dev"
 
   - name: "MOT17-10-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-10-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-10-DPM/img1"
     split: "dev"
 
   # ----- Held-out sequences (final claims ONLY) ----------------------------
   - name: "MOT17-11-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-11-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-11-DPM/img1"
     split: "heldout"
 
   - name: "MOT17-13-DPM"
     yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-13-DPM.yuv"
-    width: 1920; height: 1152; original_width: 1920; original_height: 1080
-    fps: 30; n_frames: 50
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
     frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1"
     split: "heldout"
 
