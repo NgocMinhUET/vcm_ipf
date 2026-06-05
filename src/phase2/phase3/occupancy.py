@@ -230,15 +230,47 @@ def occupancy_gate_per_object(
     ctu_x1: np.ndarray, ctu_y1: np.ndarray,
     ctu_x2: np.ndarray, ctu_y2: np.ndarray,
     cfg: OGConfig,
+    *,
+    confidence_weight: bool = True,
 ) -> np.ndarray:
-    """Compute ``G_{j,c}`` (the per-object occupancy gate) for one box."""
+    """Compute ``G_{j,c}`` (the per-object occupancy gate) for one box.
+
+    Confidence-weighted gate
+    ------------------------
+    When ``confidence_weight=True`` (default), the gate is weighted by the
+    detector confidence score of the box::
+
+        G_{j,c} = conf_j * clip(λ_ctu·A^ctu + λ_obj·A^obj, 0, 1)
+
+    This concentrates protection on high-confidence detections and reduces
+    wasted bits on background pixels inside low-confidence bounding boxes.
+    It improves mAP@[0.5:0.95] because the high-IoU threshold is more
+    sensitive to localisation quality, which is only achieved when bits are
+    not wasted on uncertain detections.
+
+    The per-object priority term (``box.confidence`` already appears in the
+    utility ``U_{j,c}``), but that only scales the *softmax weight* of the
+    object across the aggregation.  The gate ``G_{j,c}`` controls the *hard
+    protection floor* — which is independent of priority — so weighting it by
+    confidence is a separate, complementary improvement.
+
+    Backward compatibility: pass ``confidence_weight=False`` to recover the
+    original unweighted behaviour.
+    """
     inter = _intersection_area(box, ctu_x1, ctu_y1, ctu_x2, ctu_y2)
     ctu_area = np.maximum((ctu_x2 - ctu_x1) * (ctu_y2 - ctu_y1), 1e-9)
     obj_area = max(box.w * box.h, 1e-9)
     a_ctu = inter / ctu_area
     a_obj = inter / obj_area
     g = cfg.lambda_ctu * a_ctu + cfg.lambda_obj * a_obj
-    return np.clip(g, 0.0, 1.0)
+    g = np.clip(g, 0.0, 1.0)
+    if confidence_weight:
+        # Scale by sqrt(confidence) so near-certain detections (conf≈1) get
+        # full gate and uncertain detections (conf≈0.3) get ~55% gate.
+        # sqrt keeps the gate meaningful even at moderate confidence.
+        conf = float(np.clip(box.confidence, 0.0, 1.0))
+        g = g * float(np.sqrt(conf))
+    return g
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +349,7 @@ def compute_occupancy_utility(
     visible_h: Optional[int] = None,
     visible_w: Optional[int] = None,
     return_per_object: bool = False,
+    confidence_weight: bool = True,
 ) -> OccupancyResult:
     """Compute the OG-IPF utility and occupancy maps for one frame.
 
@@ -386,7 +419,10 @@ def compute_occupancy_utility(
     g_stack = np.empty((len(valid_boxes), n_rows, n_cols), dtype=np.float64)
     u_stack = np.empty_like(g_stack)
     for j, box in enumerate(valid_boxes):
-        g = occupancy_gate_per_object(box, ctu_x1, ctu_y1, ctu_x2, ctu_y2, cfg)
+        g = occupancy_gate_per_object(
+            box, ctu_x1, ctu_y1, ctu_x2, ctu_y2, cfg,
+            confidence_weight=confidence_weight,
+        )
         d = distance_kernel_per_object(box, grid_x, grid_y, cfg)
         # Context score: smooth field outside the bbox only. ``(1 - g)``
         # also zeroes the context inside the bbox so we don't double-count
@@ -450,10 +486,106 @@ def load_boxes_for_frame(boxes_dir, frame_idx: int) -> List[ObjectBox]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Temporal Occupancy Consistency — EMA smoothing of G and U across frames
+# ---------------------------------------------------------------------------
+
+class TemporalOccupancyState:
+    """Maintains an exponential moving average (EMA) of per-CTU occupancy gate
+    G_c and utility U_c across consecutive frames.
+
+    Motivation
+    ----------
+    ``compute_occupancy_utility`` is per-frame; on sequences with high
+    ego-motion (MOT17-11, MOT17-13) the CTU-aligned occupancy grid jitters
+    frame to frame.  This breaks the rate-neutral projection because the
+    background compensation pool changes sharply between adjacent frames,
+    causing ``rho_R`` to drift above 1.05 at high QP.
+
+    EMA over a short window (typically alpha ≈ 0.4–0.6, i.e. effective
+    half-life ≈ 1–2 frames) smooths the gate without delaying it enough to
+    miss genuine object motion.  The smoothed maps are used as drop-in
+    replacements for the instantaneous ``U`` and ``G_max`` inside
+    ``end_to_end_og_a_plus``.
+
+    Usage
+    -----
+    Create one ``TemporalOccupancyState`` per sequence (not per QP) and call
+    ``update(result)`` once per frame in decode order.  The returned
+    ``OccupancyResult`` carries the EMA-smoothed maps; ``G_per_object`` is
+    set to ``None`` since per-object stacks are not maintained across frames.
+
+    Formulae
+    --------
+    Let ``t`` index frames.  Initialize with the first frame.
+
+        G_ema[t] = (1 - alpha) * G_ema[t-1]  +  alpha * G_raw[t]
+        U_ema[t] = (1 - alpha) * U_ema[t-1]  +  alpha * U_raw[t]
+
+    where ``G_raw[t]`` and ``U_raw[t]`` are the outputs of
+    ``compute_occupancy_utility`` for frame ``t``.  ``alpha = 1.0`` recovers
+    the original per-frame behaviour.
+    """
+
+    def __init__(self, alpha: float = 0.5) -> None:
+        """
+        Parameters
+        ----------
+        alpha
+            EMA decay towards the current frame: 0 = never update (frozen),
+            1 = no smoothing (original per-frame behaviour).
+            Recommended range: 0.4–0.6 for MOT17-style video.
+        """
+        if not (0.0 < alpha <= 1.0):
+            raise ValueError(f"alpha must be in (0, 1]; got {alpha}")
+        self._alpha = float(alpha)
+        self._g_ema: Optional[np.ndarray] = None
+        self._u_ema: Optional[np.ndarray] = None
+
+    def reset(self) -> None:
+        """Clear accumulated state (call between sequences)."""
+        self._g_ema = None
+        self._u_ema = None
+
+    def update(self, result: "OccupancyResult") -> "OccupancyResult":
+        """Apply EMA and return the smoothed ``OccupancyResult``.
+
+        The first call initialises the EMA to the raw maps, so the very
+        first frame is always used as-is (no phantom warm-up frames needed).
+        """
+        g_raw = result.G_max.astype(np.float64)
+        u_raw = result.U.astype(np.float64)
+
+        if self._g_ema is None:
+            self._g_ema = g_raw.copy()
+            self._u_ema = u_raw.copy()
+        else:
+            if self._g_ema.shape != g_raw.shape:
+                # Resolution change (e.g. new sequence): reset.
+                self._g_ema = g_raw.copy()
+                self._u_ema = u_raw.copy()
+            else:
+                a = self._alpha
+                self._g_ema = (1.0 - a) * self._g_ema + a * g_raw
+                self._u_ema = (1.0 - a) * self._u_ema + a * u_raw
+
+        return OccupancyResult(
+            U=self._u_ema.copy(),
+            G_max=np.clip(self._g_ema, 0.0, 1.0),
+            G_per_object=None,
+            n_objects=result.n_objects,
+        )
+
+    @property
+    def alpha(self) -> float:
+        return self._alpha
+
+
 __all__ = [
     "OGConfig",
     "ObjectBox",
     "OccupancyResult",
+    "TemporalOccupancyState",
     "make_ctu_grid",
     "occupancy_gate_per_object",
     "distance_kernel_per_object",

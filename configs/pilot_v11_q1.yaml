@@ -1,0 +1,150 @@
+# =============================================================================
+# Phase 2 Pilot v11_q1 — Q1-ISI submission-grade head-to-head
+# =============================================================================
+# Goal: produce the per-sequence RD table required by the VCM evaluation
+# standard (see .cursor/rules/vcm-evaluation-methodology.mdc):
+#
+#     Method | QP | Rate | Accuracy | BD-Rate | BD-Accuracy
+#
+# Strengthening vs pilot_v10_bench (which was not Q1-ready):
+#   1. QP grid extended to {22,27,32,37,42}  (was {27,32,37,42}) so BD
+#      integration has >=5 RD points and a near-lossless anchor at QP22.
+#   2. All 7 MOT17 train sequences (was 3) -> shrinks bootstrap variance.
+#   3. STRONGER detector (yolov8m) to escape the YOLOv8n saturation regime
+#      (H~0.11 -> >1). This is the single highest-impact change: it makes
+#      the BD-Rate / BD-Accuracy gains statistically RESOLVABLE.
+#   4. PSNR + SSIM reported (MPEG CTC auxiliary metrics).
+#   5. Methods: M0 anchor + classical references (M1,M5,M6) + proposed
+#      CA-OGIPF (M4-OG). NOTE: add >=1 RECENT (2023-2026) reputable
+#      reference method here once reproduced (separate task).
+#
+# PRE-CONDITIONS (run on server FIRST):
+#   A. Regenerate Q-adaptive maps for the proposed method INCLUDING QP22:
+#        edit configs/phase3_liteqp_og.yaml -> qp_list: [22,27,32,37,42]
+#        PYTHONPATH=src python scripts/run_phase3_liteqp_pipeline.py \
+#            --config configs/phase3_liteqp_og.yaml
+#   B. Unify maps for all methods/sequences/QPs into one root
+#        (extend prepare_pilot_v10_root.py with --base-qps 22 27 32 37 42
+#         and all 7 sequences).
+#   C. Convert all 7 sequences to YUV (1920x1152, padded from 1080).
+#
+# RUN:
+#   bash scripts/run_pilot.sh configs/pilot_v11_q1.yaml
+#
+# AUDITED EVAL (real MOT17 GT, bootstrap CI, Wilcoxon/Cohen d, headroom H):
+#   PYTHONPATH=src python scripts/reevaluate_pilots.py \
+#       --pilots pilot_v11_q1 --pilots-root ~/Minh/ipf/phase2_outputs \
+#       --configs configs/pilot_v11_q1.yaml \
+#       --reference-method M0 --test-methods M1 M5 M6 M4-OG \
+#       --device cuda:0 --n-boot 1000
+#
+# EXPORT per-sequence RD table (the supervisor's template):
+#   PYTHONPATH=src python scripts/export_per_sequence_rd_table.py \
+#       --experiment-summary ~/Minh/ipf/phase2_outputs/pilot_v11_q1/experiment_summary.json \
+#       --d1-json ~/Minh/ipf/phase2_outputs/pilot_v11_q1/diagnostics/d1_true_map.json \
+#       --anchor M0 --proposed M4-OG \
+#       --out-dir ~/Minh/ipf/phase2_outputs/pilot_v11_q1/rd_tables
+# =============================================================================
+
+experiment_id: "pilot_v11_q1"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  encoder_cfg:  "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 10800
+
+sequences:
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+
+  - name: "MOT17-05-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-05-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 14
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-05-DPM/img1"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+
+  - name: "MOT17-10-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-10-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-10-DPM/img1"
+
+  - name: "MOT17-11-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-11-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 30
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-11-DPM/img1"
+
+  - name: "MOT17-13-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-13-DPM.yuv"
+    width: 1920
+    height: 1152
+    original_width: 1920
+    original_height: 1080
+    fps: 25
+    n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1"
+
+encoding:
+  qp_points: [22, 27, 32, 37, 42]
+  # M0 anchor (H26x) + classical references + proposed CA-OGIPF.
+  # TODO: append a recent (2023-2026) reputable reference once reproduced.
+  methods: ["M0", "M1", "M5", "M6", "M4-OG"]
+  phase1_output_dir: "~/Minh/ipf/pilot_v11_q1_root"
+  phase1_run_prefix: "multi_seq_"
+
+evaluation:
+  compute_psnr: true
+  compute_ssim: true
+  compute_task_accuracy: true
+  # Stronger detector to escape saturation; eval runs on cached decoded frames.
+  detector_model: "yolov8m.pt"
+  detector_confidence: 0.25
+  detector_conf_low: 0.001
+  detector_classes: [0]
+  detector_device: "cuda:0"
+  roi_expansion: 0.1

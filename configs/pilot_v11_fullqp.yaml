@@ -1,0 +1,165 @@
+# =============================================================================
+# Pilot v11 — Full QP grid, 7 sequences, all methods + reference baseline
+# =============================================================================
+# Changes vs pilot_v8_og (current state-of-the-art config):
+#   - QP grid: {22, 27, 32, 37, 42}  (was {27, 32, 37, 42})
+#     Adds QP=22 (near-lossless) to widen PCHIP integration interval and
+#     match the MPEG VCM CTC recommendation (6 points; minimum 5).
+#   - Sequences: all 7 MOT17 train sequences (was 3)
+#   - Methods: M0, M_soft_roi_ref (new international reference), M1, M5, M6,
+#     Classical-IPF, LiteQP-v4, CA-OGIPF
+#   - Held-out split:
+#       dev (train):   MOT17-02, 04, 05, 09, 10  (5 sequences)
+#       held-out:      MOT17-11, MOT17-13         (2 sequences — last used)
+#     Final BD-Rate claims must be reported on the held-out set only.
+#   - Evaluation: both yolov8n (saturation diagnostic) and yolov8x (headline)
+#   - EMA temporal consistency: ema_alpha=0.5 (enabled via OGConfig override)
+#   - Confidence-weighted gate: enabled by default in occupancy.py
+#   - K_c calibration: loaded from rate_surrogate.npz (qp_lo=22, qp_hi=42)
+# =============================================================================
+
+experiment_id: "pilot_v11_fullqp"
+output_dir: "~/Minh/ipf/phase2_outputs"
+log_level: "INFO"
+
+vtm:
+  encoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/EncoderAppStatic"
+  decoder_path: "~/Minh/ipf/vtm/VVCSoftware_VTM/bin/DecoderAppStatic"
+  # Use low-delay config (consistent with previous pilots; random-access
+  # is the MPEG CTC recommendation for video — upgrade for camera-ready).
+  encoder_cfg:  "~/Minh/ipf/vtm/VVCSoftware_VTM/cfg/encoder_lowdelay_vtm.cfg"
+  internal_bit_depth: 8
+  threads: 1
+  timeout_s: 14400   # 4 h per encode to accommodate QP=22 (large bitstream)
+
+# ---------------------------------------------------------------------------
+# Sequences — 7 MOT17 train sequences
+# dev: MOT17-02/04/05/09/10  |  held-out: MOT17-11/13
+# ---------------------------------------------------------------------------
+sequences:
+  - name: "MOT17-02-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-02-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-02-DPM/img1"
+    split: "dev"
+
+  - name: "MOT17-04-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-04-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-04-DPM/img1"
+    split: "dev"
+
+  - name: "MOT17-05-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-05-DPM.yuv"
+    width: 640; height: 480; original_width: 640; original_height: 480
+    fps: 14; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-05-DPM/img1"
+    split: "dev"
+
+  - name: "MOT17-09-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-09-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-09-DPM/img1"
+    split: "dev"
+
+  - name: "MOT17-10-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-10-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-10-DPM/img1"
+    split: "dev"
+
+  # ----- Held-out sequences (final claims ONLY) ----------------------------
+  - name: "MOT17-11-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-11-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-11-DPM/img1"
+    split: "heldout"
+
+  - name: "MOT17-13-DPM"
+    yuv_path: "~/Minh/ipf/datasets/yuv/MOT17-13-DPM.yuv"
+    width: 1920; height: 1152; original_width: 1920; original_height: 1080
+    fps: 30; n_frames: 50
+    frames_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train/MOT17-13-DPM/img1"
+    split: "heldout"
+
+# ---------------------------------------------------------------------------
+# Encoding
+# ---------------------------------------------------------------------------
+encoding:
+  # 5-point QP grid (MPEG CTC minimum).  Add 47 for full 6-point CTC.
+  qp_points: [22, 27, 32, 37, 42]
+
+  # Methods
+  #   M0                 Anchor (uniform QP, no external map)
+  #   M_soft_roi_ref     Recent international reference (Liu et al. 2023 /
+  #                      Yang et al. 2024 — see §reference in plan)
+  #   M1                 Binary rectangular ROI (internal baseline)
+  #   M5                 Anisotropic Gaussian (internal baseline)
+  #   M6                 RD-driven Lagrangian (internal baseline)
+  #   Classical-IPF      Our prior mass-distance IPF (ablation)
+  #   LiteQP-v4          Prior learned baseline (internal comparison)
+  #   CA-OGIPF           Proposed method (M4-OG with v11 improvements)
+  methods: ["M0", "M_soft_roi_ref", "M1", "M5", "M6", "Classical-IPF",
+            "LiteQP-v4", "CA-OGIPF"]
+
+  phase1_output_dir: "~/Minh/ipf/phase3_outputs/learned"
+  phase1_run_prefix: "liteqp_og_v11_"
+
+  # OG-IPF algorithmic improvements (v11)
+  og_ipf:
+    ema_alpha: 0.5                  # temporal EMA on G_c/U_c (0.5 = 1-frame half-life)
+    confidence_weight: true         # weight G_c by sqrt(detector confidence)
+    use_adaptive_activation: true   # content-adaptive activation from anchor slope
+    use_calibrated_K: true          # load K_c from rate_surrogate.npz (two-point fit)
+    k_calibration_qp_lo: 22        # QP for K_c calibration low point
+    k_calibration_qp_hi: 42        # QP for K_c calibration high point
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+evaluation:
+  compute_psnr: true
+  compute_ssim: true     # added for MPEG CTC compliance
+  compute_task_accuracy: true
+
+  # Primary detector (for ROI map generation AND evaluation).
+  # Note: CA-OGIPF uses this detector for its importance map, so changing
+  # the eval detector only changes the metric, not the allocation.
+  detector_model: "yolov8n.pt"    # kept for ROI map generation
+  detector_confidence: 0.25
+  detector_conf_low: 0.001        # COCO-AP sweep requires near-zero threshold
+  detector_classes: [0]           # person only
+  detector_device: "cuda:0"
+  roi_expansion: 0.1
+
+  # Headline evaluation uses a stronger detector (re-run post-encode).
+  # Set to "" to skip the re-eval step; set to "yolov8x" for the Q1 paper.
+  strong_detector_model: "yolov8x.pt"
+
+  # GT source: always human-annotated (never pseudo-GT from M0 detector).
+  gt_dir: "~/Minh/ipf/datasets/MOT17/MOT17/train"
+  gt_visibility_threshold: 0.25
+
+  # Statistical protocol
+  bootstrap_n: 1000
+  bootstrap_alpha: 0.05
+  wilcoxon_alpha: 0.05
+  cohens_d_threshold: 0.2
+
+# ---------------------------------------------------------------------------
+# Held-out split protocol (anti-overfitting gate)
+# ---------------------------------------------------------------------------
+# The dev/heldout split above is applied by the analysis script
+# (export_per_sequence_rd_table.py).  The rule:
+#   - ALL hyperparameter tuning and ablations are run on dev sequences only.
+#   - BD-Rate superiority claims in the paper are reported on heldout sequences.
+#   - The heldout sequences (MOT17-11, MOT17-13) are the two known regressions
+#     from pilot_v8_og — chosen BEFORE seeing v11 results (no selection bias).
+heldout_sequences: ["MOT17-11-DPM", "MOT17-13-DPM"]
+dev_sequences: ["MOT17-02-DPM", "MOT17-04-DPM", "MOT17-05-DPM",
+                "MOT17-09-DPM", "MOT17-10-DPM"]

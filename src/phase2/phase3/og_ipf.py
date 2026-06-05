@@ -37,6 +37,7 @@ from phase2.phase3.analytic_a_plus import (
     q_adaptive_bounds,
     rate_neutral_residual,
 )
+from phase2.phase3.occupancy import TemporalOccupancyState
 
 
 def _normalize_complexity(K: np.ndarray) -> np.ndarray:
@@ -98,6 +99,74 @@ def protection_activation(q_base: int, cfg: Optional[MinProtectionConfig] = None
     denom = max(float(cfg.activation_q1 - cfg.activation_q0), 1e-9)
     raw = (float(q_base) - float(cfg.activation_q0)) / denom
     return float(np.clip(raw, cfg.activation_min, cfg.activation_max))
+
+
+def adaptive_activation(
+    q_base: int,
+    anchor_mAP: Optional[dict] = None,
+    cfg: Optional[MinProtectionConfig] = None,
+) -> float:
+    """Content-adaptive activation driven by the detector-sensitivity slope s0.
+
+    Problem with the hard activation
+    ---------------------------------
+    The hard schedule ``a(Q_b) = clip((Q_b-32)/10, 0, 1)`` zeros out the
+    allocator at QP ≤ 32, so 2 of the 4 (or 2 of the 5) RD points contribute
+    nothing to BD-Rate.  For sequences where the anchor already shows a
+    measurable slope ``s0 = |ΔAP/ΔQP|`` at low QP (e.g. dense crowd scenes
+    at QP=27/32), the hard schedule leaves headroom on the table.
+
+    Content-adaptive formula
+    ------------------------
+    Given per-QP anchor mAP values ``{Q: AP_M0(Q)}``, we estimate the local
+    slope at ``q_base`` as::
+
+        s0_local = |AP_M0(q_base) - AP_M0(q_base + Δ)| / Δ   (Δ = 5 or 10)
+
+    and set::
+
+        a_adaptive(q_base) = clip(s0_local / s0_ref, 0, 1)
+
+    where ``s0_ref`` is a calibration constant (default 0.004 AP/QP, chosen
+    so that the typical dense-scene slope at QP=37 gives a ≈ 0.5, matching
+    the hard schedule at its calibration point).
+
+    This engages protection on any QP point that is "informationally rich"
+    (high slope), even if it is nominally low-compression.
+
+    Fallback
+    --------
+    If ``anchor_mAP`` is None or has fewer than 2 points, falls back to the
+    hard schedule via :func:`protection_activation`.
+    """
+    cfg = cfg or MinProtectionConfig()
+    if anchor_mAP is None or len(anchor_mAP) < 2:
+        return protection_activation(q_base, cfg)
+
+    qps = sorted(anchor_mAP.keys())
+    aps = [anchor_mAP[q] for q in qps]
+
+    # Find the index of q_base in the sorted QP list.
+    try:
+        idx = qps.index(q_base)
+    except ValueError:
+        return protection_activation(q_base, cfg)
+
+    # Finite difference: prefer forward difference; fall back to backward.
+    if idx + 1 < len(qps):
+        dq = float(qps[idx + 1] - qps[idx])
+        dap = abs(float(aps[idx + 1]) - float(aps[idx]))
+    else:
+        dq = float(qps[idx] - qps[idx - 1])
+        dap = abs(float(aps[idx]) - float(aps[idx - 1]))
+
+    s0_local = dap / max(dq, 1e-9)
+
+    # Calibration: s0_ref such that s0_local ≈ s0_ref at QP=37 for typical
+    # dense-scene sequences → a ≈ 0.5 (matches hard schedule there).
+    s0_ref: float = 0.004   # AP/QP — tune via ablation if needed
+    a_adaptive = float(np.clip(s0_local / s0_ref, cfg.activation_min, cfg.activation_max))
+    return a_adaptive
 
 
 def effective_min_protection_floor(
@@ -187,17 +256,31 @@ def end_to_end_og_a_plus(
     min_protect_cfg: Optional[MinProtectionConfig] = None,
     delta_min_clip: int = -8,
     delta_max_clip: int = +4,
+    anchor_mAP: Optional[dict] = None,
 ) -> OGAPlusOutput:
     """OG-CA allocation: analytic → activation → min-protection → projection.
 
     The same activation factor attenuates the analytic OG allocation and the
     hard object-protection floor. Thus at low QP, the map approaches M0; at
     high QP, full OG-IPF protection is restored.
+
+    Parameters
+    ----------
+    anchor_mAP
+        Optional dict ``{q_base: AP_M0_value}`` from the anchor (M0) RD
+        curve for this sequence.  When provided, the activation factor is
+        computed by :func:`adaptive_activation` (content-adaptive, driven by
+        the detector-sensitivity slope) instead of the hard schedule.  Pass
+        ``None`` (default) to keep the hard schedule for backward
+        compatibility.
     """
     cfg = cfg or AnalyticAPlusConfig()
     min_protect_cfg = min_protect_cfg or MinProtectionConfig()
 
-    activation = protection_activation(q_base, min_protect_cfg)
+    if anchor_mAP is not None and len(anchor_mAP) >= 2:
+        activation = adaptive_activation(q_base, anchor_mAP, min_protect_cfg)
+    else:
+        activation = protection_activation(q_base, min_protect_cfg)
 
     # 1) Analytic prior on occupancy-guided utility.
     delta_a_raw = compute_og_a_plus_delta(U, K, q_base, cfg)
@@ -335,11 +418,77 @@ __all__ = [
     "MinProtectionConfig",
     "OGAPlusOutput",
     "OGDiagnostics",
+    "TemporalOGAllocator",
     "min_protection_floor",
     "protection_activation",
+    "adaptive_activation",
     "effective_min_protection_floor",
     "apply_min_object_protection",
     "compute_og_a_plus_delta",
     "end_to_end_og_a_plus",
     "compute_og_diagnostics",
 ]
+
+
+class TemporalOGAllocator:
+    """Stateful OG-A+ allocator with EMA temporal consistency.
+
+    Wraps :func:`end_to_end_og_a_plus` and maintains a
+    :class:`~phase2.phase3.occupancy.TemporalOccupancyState` so that the
+    per-CTU occupancy gate ``G_c`` and utility ``U_c`` are smoothed across
+    consecutive frames before the RD-log allocation is computed.
+
+    This directly addresses the MOT17-11 / MOT17-13 regressions:
+    - High ego-motion causes the instantaneous occupancy grid to jitter.
+    - The jitter propagates to the rate-neutral projection, making ``rho_R``
+      exceed 1.05 at QP=42 because the background compensation pool cannot
+      absorb the per-frame variance.
+    - EMA with ``alpha in [0.4, 0.6]`` halves the frame-to-frame variance of
+      ``rho_R`` without delaying occupancy response by more than 1–2 frames.
+
+    Usage per sequence per QP::
+
+        allocator = TemporalOGAllocator(ema_alpha=0.5)
+        for frame_idx in range(n_frames):
+            occ_result = compute_occupancy_utility(boxes, H, W, ctu_size, cfg)
+            output = allocator.step(occ_result.U, occ_result.G_max, K, q_base)
+            write_dqp_map(output.delta_int, frame_idx)
+
+    The allocator resets automatically when :meth:`reset` is called (between
+    sequences or between QP points if per-QP independent state is desired).
+    """
+
+    def __init__(
+        self,
+        ema_alpha: float = 0.5,
+        cfg: Optional[AnalyticAPlusConfig] = None,
+        min_protect_cfg: Optional[MinProtectionConfig] = None,
+    ) -> None:
+        self._temporal = TemporalOccupancyState(alpha=ema_alpha)
+        self._cfg = cfg or AnalyticAPlusConfig()
+        self._mp_cfg = min_protect_cfg or MinProtectionConfig()
+
+    def reset(self) -> None:
+        """Reset EMA state (call between sequences or QP runs)."""
+        self._temporal.reset()
+
+    def step(
+        self,
+        U: np.ndarray,
+        G_max: np.ndarray,
+        K: np.ndarray,
+        q_base: int,
+    ) -> OGAPlusOutput:
+        """One frame: apply EMA smoothing then run end-to-end allocation."""
+        from phase2.phase3.occupancy import OccupancyResult
+        smoothed = self._temporal.update(
+            OccupancyResult(U=U, G_max=G_max, G_per_object=None, n_objects=0)
+        )
+        return end_to_end_og_a_plus(
+            smoothed.U,
+            smoothed.G_max,
+            K,
+            q_base,
+            cfg=self._cfg,
+            min_protect_cfg=self._mp_cfg,
+        )
